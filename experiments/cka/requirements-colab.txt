@@ -1,0 +1,2 @@
+# Shared dependencies; keep Colab's matched CUDA PyTorch installation.
+-r ../../requirements.txt

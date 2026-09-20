@@ -1,0 +1,41 @@
+# Local environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+.DS_Store
+.env
+.env.*
+*.pem
+*.key
+
+# Generated runs and downloaded data
+logs/
+checkpoints/
+**/checkpoints/
+**/outputs/
+**/itspm_tpp_runs/
+**/runs/
+wandb/
+*.log
+*.ckpt
+*.pth
+*.pt
+*.pkl
+*.npy
+*.npz
+data/*
+
+# Exactly three bundled datasets and paired CKA reference arrays
+!data/activity/
+data/activity/*
+!data/activity/processed/
+data/activity/processed/*
+!data/activity/processed/data.pt
+!Temporal Point Process/taxi/train.pkl
+!Temporal Point Process/taxi/dev.pkl
+!Temporal Point Process/taxi/test.pkl
+!Generation/irregular_generation_diffmn/table1_data/mujoco_training_36.pt
+!results/cka/*/representations.npz
