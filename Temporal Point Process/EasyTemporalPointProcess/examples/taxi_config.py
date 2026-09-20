@@ -16,9 +16,9 @@ def make_config(dataset, params, seed, run_id, include_test):
     """Keep the original selected Taxi architecture and optimizer parameters."""
     if dataset != "taxi":
         raise ValueError("This supplementary package includes the Taxi experiment only.")
-    with (ROOT / "examples" / "configs" / "itspm_tpp_config.yaml").open() as stream:
+    with (ROOT / "examples" / "configs" / "heteronet_tpp_config.yaml").open() as stream:
         cfg = yaml.safe_load(stream)
-    exp = cfg["ITSPM_train"]
+    exp = cfg["HeteroNet_train"]
     exp["base_config"]["dataset_id"] = dataset
     exp["base_config"]["base_dir"] = str(ROOT / "outputs" / run_id)
     exp["trainer_config"].update(

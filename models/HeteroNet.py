@@ -1,5 +1,5 @@
 """
-ITSPM / Fast-SIPM: Sparse Irregular Pattern Machine (Fast Version)
+HeteroNet for Irregular Time Series
 ==================================================================
 A lightweight, evidence-aware representation framework for irregular time series.
 
@@ -721,12 +721,12 @@ class QueryTokenReadout(nn.Module):
 
 
 # ─────────────────────────────────────────────────────────────────
-# 6. Main Model: ITSPM (Fast-SIPM)
+# 6. Main Model: HeteroNet
 # ─────────────────────────────────────────────────────────────────
 
-class ITSPM(nn.Module):
+class HeteroNet(nn.Module):
     """
-    Fast-SIPM: Sparse Irregular Pattern Machine (Fast Version).
+    HeteroNet: a backbone for irregular time series.
 
     Replaces slow dynamic segment/silence tokenizer with fully vectorized:
       - event tokens   (top-k recent events)

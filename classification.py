@@ -14,14 +14,14 @@ import torch.optim as optim
 from torch.nn.parallel import DataParallel
 from lib.utils import *
 from lib.Dataset_MM import get_PAM_data, get_P12_data, get_P19_data, get_P12_data_zeroshot
-from models.ITSPM import ITSPM
+from models.HeteroNet import HeteroNet
 
 
 eps=1e-7
-ITSPM_MODEL_NAMES = ['itspm', 'ipmixer', 'irregularpatternmixer']
+HETERONET_MODEL_NAMES = ['heteronet', 'ipmixer', 'irregularpatternmixer']
 
 
-class ITSPMClassifier(nn.Module):
+class HeteroNetClassifier(nn.Module):
     def __init__(self, dim, cls_dim, dropout=0.1):
         super().__init__()
         hidden = max(dim, 64)
@@ -229,7 +229,7 @@ def run_experiment(model, training_data, validation_data, testing_data, optimize
     epoch = 0
     best_valid_metric = -np.inf
     scaler = torch.cuda.amp.GradScaler()
-    is_itspm = opt.model.lower() in ITSPM_MODEL_NAMES
+    is_heteronet = opt.model.lower() in HETERONET_MODEL_NAMES
     save_flag = True
 
     if not opt.test_only:
@@ -309,7 +309,7 @@ def main():
     parser = argparse.ArgumentParser()
 
     parser.add_argument('--state', type=str, default='def')
-    parser.add_argument('--model', type=str, default='gpt', help='select from [gpt, gpt_patch, warpformer]')
+    parser.add_argument('--model', type=str, default='HeteroNet', help='model name (HeteroNet)')
 
     parser.add_argument('--root_path', type=str, default='')
     parser.add_argument('--save_path', type=str, default='./Classification/archive_save/save/')
@@ -340,7 +340,7 @@ def main():
     parser.add_argument('--retrain', action='store_true')
     parser.add_argument('--n_classes',  type=int, default=2)
 
-    parser.add_argument('--d_model', type=int, default=128, help="ITSPM hidden dimension")
+    parser.add_argument('--d_model', type=int, default=128, help="HeteroNet hidden dimension")
     parser.add_argument('--max_len', type=int, default=-1)
     parser.add_argument('--few_shot', action='store_true')
     parser.add_argument('--sample_rate', type=float, default=1.0)
@@ -362,7 +362,7 @@ def main():
     # dataset
     parser.add_argument('--split', type=str, default='1')
 
-    # ITSPM arguments
+    # HeteroNet arguments
     parser.add_argument('--n_ref_points', type=int, default=32)
     parser.add_argument('--n_scales', type=int, default=3)
     parser.add_argument('--n_mixer_layers', type=int, default=2)
@@ -424,17 +424,17 @@ def main():
         opt.load_path = opt.root_path + opt.load_path
 
     """ prepare model """
-    if opt.model.lower() in ['itspm', 'ipmixer', 'irregularpatternmixer']:
-        model = ITSPM(opt)
+    if opt.model.lower() in ['heteronet', 'ipmixer', 'irregularpatternmixer']:
+        model = HeteroNet(opt)
     else:
-        raise ValueError(f"Unsupported model '{opt.model}'. This cleaned project keeps ITSPM only.")
+        raise ValueError(f"Unsupported model '{opt.model}'. This cleaned project keeps HeteroNet only.")
 
     print("! The backbone model is:", opt.model)
 
     para_list = list(model.parameters())
 
-    if opt.model.lower() in ITSPM_MODEL_NAMES:
-        mort_classifier = ITSPMClassifier(opt.d_model, opt.n_classes, dropout=opt.dropout)
+    if opt.model.lower() in HETERONET_MODEL_NAMES:
+        mort_classifier = HeteroNetClassifier(opt.d_model, opt.n_classes, dropout=opt.dropout)
 
     para_list += list(mort_classifier.parameters())
 
@@ -483,7 +483,7 @@ def main():
     if opt.positive_weight > 0 and opt.n_classes == 2:
         class_weights = torch.tensor([1.0, opt.positive_weight], device=opt.device)
         print("[Info] Class weights:", class_weights.detach().cpu().numpy())
-    elif opt.balanced_loss or (opt.model.lower() in ITSPM_MODEL_NAMES and not opt.no_auto_class_weights):
+    elif opt.balanced_loss or (opt.model.lower() in HETERONET_MODEL_NAMES and not opt.no_auto_class_weights):
         class_weights = build_class_weights(trainloader, opt.n_classes, opt.device)
         if class_weights is not None:
             print("[Info] Class weights:", class_weights.detach().cpu().numpy())
@@ -496,8 +496,8 @@ def main():
 
 
     # setup the log file
-    is_itspm = opt.model.lower() in ITSPM_MODEL_NAMES
-    if not is_itspm:
+    is_heteronet = opt.model.lower() in HETERONET_MODEL_NAMES
+    if not is_heteronet:
         with open(opt.log, 'a') as f:
             f.write('[Info] parameters: {}\n'.format(opt))
 
@@ -531,7 +531,7 @@ def main():
 
     # Construct hyperparameter string
     hparams = []
-    if opt.model.lower() in ITSPM_MODEL_NAMES:
+    if opt.model.lower() in HETERONET_MODEL_NAMES:
         token_hparams = ""
         if opt.max_event_tokens is not None or opt.max_gap_tokens is not None:
             token_hparams = f", max_event_tokens: {opt.max_event_tokens}, max_gap_tokens: {opt.max_gap_tokens}"
@@ -556,7 +556,7 @@ def main():
     seconds = int(training_duration % 60)
     training_time_str = f"{minutes}m {seconds}s"
 
-    results_path = os.environ.get("ITSPM_CLASSIFICATION_RESULTS_FILE", "Classification/results/Classification_results.txt")
+    results_path = os.environ.get("HETERONET_CLASSIFICATION_RESULTS_FILE", "Classification/results/Classification_results.txt")
     results_dir = os.path.dirname(results_path)
     if results_dir:
         os.makedirs(results_dir, exist_ok=True)

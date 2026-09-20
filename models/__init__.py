@@ -1,1 +1,1 @@
-from .ITSPM import ITSPM
+from .HeteroNet import HeteroNet

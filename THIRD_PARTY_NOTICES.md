@@ -21,9 +21,6 @@ source files.
   [DOI 10.24432/C57G8X](https://doi.org/10.24432/C57G8X),
   [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
   The bundled file is a processed form of that dataset; see [data notes](docs/DATA.md).
-- **CKA method**: [Kornblith et al., ICML 2019](https://proceedings.mlr.press/v97/kornblith19a.html).
-  The numerical implementation is independently checked against the centered
-  Gram-matrix formula.
 
 Upstream licenses apply to their respective components; no repository-wide
 license is inferred from these third-party notices.

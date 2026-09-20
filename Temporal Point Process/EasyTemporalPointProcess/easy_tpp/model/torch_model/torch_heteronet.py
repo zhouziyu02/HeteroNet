@@ -297,8 +297,8 @@ class _PatternInteraction(nn.Module):
         return self.global_proj(torch.cat([global_mean, global_max, fused], dim=-1))
 
 
-class ITSPM(TorchBaseModel):
-    """Causal local-window ITSPM adapted to marked TPP likelihood training."""
+class HeteroNet(TorchBaseModel):
+    """Causal local-window HeteroNet adapted to marked TPP likelihood training."""
 
     def __init__(self, model_config):
         super().__init__(model_config)

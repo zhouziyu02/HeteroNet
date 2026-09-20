@@ -20,7 +20,7 @@ TASK_DIR = Path(__file__).resolve().parent
 REPO_ROOT = TASK_DIR.parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from models.ITSPM import ITSPM  # noqa: E402
+from models.HeteroNet import HeteroNet  # noqa: E402
 
 
 DIFF_MN_TABLE1 = {
@@ -43,7 +43,7 @@ DIFF_MN_TABLE1 = {
 
 
 @dataclass
-class ITSPMConfig:
+class HeteroNetConfig:
     input_dim: int
     d_model: int = 64
     dropout: float = 0.1
@@ -173,8 +173,8 @@ def load_table1_dataset(args: argparse.Namespace) -> tuple[np.ndarray, np.ndarra
             raise FileNotFoundError(
                 f"Missing real MuJoCo trajectory file: {pt}. "
                 "From the repository root, install the physics dependencies with "
-                "'python -m experiments.cka.install_physics', then run "
-                f"'python -m experiments.cka.prepare_mujoco --lengths {args.seq_len}', "
+                "'python Generation/scripts/install_physics.py', then run "
+                f"'python Generation/scripts/prepare_mujoco.py --lengths {args.seq_len}', "
                 "or provide the matching trajectory file under --data_root. "
                 "Synthetic proxy fallback is disabled."
             )
@@ -219,12 +219,12 @@ class SinTimeEmbedding(nn.Module):
         return self.proj(torch.cat([t.unsqueeze(-1), torch.sin(angle), torch.cos(angle)], dim=-1))
 
 
-class ITSPMLatentAutoencoder(nn.Module):
-    def __init__(self, cfg: ITSPMConfig, seq_len: int, channels: int, latent_dim: int):
+class HeteroNetLatentAutoencoder(nn.Module):
+    def __init__(self, cfg: HeteroNetConfig, seq_len: int, channels: int, latent_dim: int):
         super().__init__()
         self.seq_len = seq_len
         self.channels = channels
-        self.backbone = ITSPM(cfg)
+        self.backbone = HeteroNet(cfg)
         self.to_latent = nn.Sequential(
             nn.LayerNorm(cfg.d_model),
             nn.Linear(cfg.d_model, latent_dim),
@@ -298,10 +298,10 @@ class SequenceDenoiser(nn.Module):
         return self.out_proj(h).transpose(1, 2)
 
 
-class ITSPMConditionedDenoiser(nn.Module):
-    def __init__(self, cfg: ITSPMConfig, channels: int, hidden: int, n_steps: int):
+class HeteroNetConditionedDenoiser(nn.Module):
+    def __init__(self, cfg: HeteroNetConfig, channels: int, hidden: int, n_steps: int):
         super().__init__()
-        self.itspm = ITSPM(cfg)
+        self.heteronet = HeteroNet(cfg)
         self.time_emb = nn.Embedding(n_steps, hidden)
         self.cond_proj = nn.Linear(cfg.d_model, hidden)
         self.in_proj = nn.Conv1d(channels * 3, hidden, 3, padding=1)
@@ -326,7 +326,7 @@ class ITSPMConditionedDenoiser(nn.Module):
         mask: torch.Tensor,
         obs_times: torch.Tensor,
     ) -> torch.Tensor:
-        cond = self.cond_proj(self.itspm(obs_times, obs, mask)).unsqueeze(-1)
+        cond = self.cond_proj(self.heteronet(obs_times, obs, mask)).unsqueeze(-1)
         te = self.time_emb(t).unsqueeze(-1)
         denoise_in = torch.cat([x_t, obs, mask], dim=-1)
         h = self.in_proj(denoise_in.transpose(1, 2))
@@ -384,7 +384,7 @@ class SequenceDDPM(LatentDDPM):
     @torch.no_grad()
     def sample_conditioned(
         self,
-        denoiser: ITSPMConditionedDenoiser,
+        denoiser: HeteroNetConditionedDenoiser,
         obs: torch.Tensor,
         mask: torch.Tensor,
         obs_times: torch.Tensor,
@@ -444,9 +444,9 @@ def train_direct_diffusion(
     return fake, metrics, denoiser
 
 
-def train_itspm_conditioned_diffusion(
+def train_heteronet_conditioned_diffusion(
     args: argparse.Namespace,
-    cfg: ITSPMConfig,
+    cfg: HeteroNetConfig,
     data: np.ndarray,
     obs_data: np.ndarray,
     mask: np.ndarray,
@@ -457,7 +457,7 @@ def train_itspm_conditioned_diffusion(
     device: torch.device,
 ) -> tuple[np.ndarray, dict, nn.Module]:
     ddpm = SequenceDDPM(args.diffusion_steps, args.beta_start, args.beta_end, device)
-    denoiser = ITSPMConditionedDenoiser(cfg, args.channels, args.diffusion_hidden, args.diffusion_steps).to(device)
+    denoiser = HeteroNetConditionedDenoiser(cfg, args.channels, args.diffusion_hidden, args.diffusion_steps).to(device)
     opt = torch.optim.AdamW(denoiser.parameters(), lr=args.diff_lr, weight_decay=args.weight_decay)
     x_all = torch.from_numpy(data.astype(np.float32)).to(device)
     obs_all = torch.from_numpy(obs_data.astype(np.float32)).to(device)
@@ -491,7 +491,7 @@ def train_itspm_conditioned_diffusion(
             opt.step()
             losses.append(float(loss.detach().cpu()))
         if epoch == 1 or epoch % max(1, args.log_every) == 0:
-            print(f"itspm_cond_diff_epoch={epoch:03d} loss={np.mean(losses):.6f}")
+            print(f"heteronet_cond_diff_epoch={epoch:03d} loss={np.mean(losses):.6f}")
 
     denoiser.eval()
     test_slice = slice(split, len(data))
@@ -745,7 +745,7 @@ def train(args: argparse.Namespace) -> dict:
     out_dir = TASK_DIR / args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    cfg = ITSPMConfig(
+    cfg = HeteroNetConfig(
         input_dim=args.channels,
         d_model=args.d_model,
         dropout=args.dropout,
@@ -776,15 +776,15 @@ def train(args: argparse.Namespace) -> dict:
             "args": vars(args),
             "elapsed_sec": time.time() - start,
             "source": "Task-local direct sequence diffusion upper-bound inspired by TimeCraft Diff-MN.",
-            "paper_protocol": "upper_bound_not_itspm",
+            "paper_protocol": "upper_bound_not_heteronet",
         }
         with open(out_dir / "results.json", "w", encoding="utf-8") as f:
             json.dump(result, f, indent=2, sort_keys=True)
         print(json.dumps(metrics, indent=2, sort_keys=True))
         return result
 
-    if args.generator == "itspm_conditioned_diffusion":
-        fake, cond_metrics, denoiser = train_itspm_conditioned_diffusion(
+    if args.generator == "heteronet_conditioned_diffusion":
+        fake, cond_metrics, denoiser = train_heteronet_conditioned_diffusion(
             args, cfg, data, obs_data, mask, times, train_data, test_data, split, device)
         if args.calibrate_marginals:
             if args.clamp_observed:
@@ -796,7 +796,7 @@ def train(args: argparse.Namespace) -> dict:
         cond_metrics = table1_metrics(test_eval, fake_eval, device, args)
         cond_metrics["observed_mse"] = float(((fake - test_data) ** 2 * mask[split:]).sum() / (mask[split:].sum() + 1e-6))
         cond_metrics["missing_mse"] = float(((fake - test_data) ** 2 * (1.0 - mask[split:])).sum() / ((1.0 - mask[split:]).sum() + 1e-6))
-        metrics["itspm_conditioned_diffusion"] = cond_metrics
+        metrics["heteronet_conditioned_diffusion"] = cond_metrics
         np.save(out_dir / "generated.npy", fake_eval.astype(np.float32))
         np.save(out_dir / "real_test.npy", test_eval.astype(np.float32))
         np.save(out_dir / "observed_test.npy", obs_eval.astype(np.float32))
@@ -807,11 +807,11 @@ def train(args: argparse.Namespace) -> dict:
             "diffmn_table1_reference": diffmn_ref,
             "table1_dataset_available": is_table1_dataset,
             "args": vars(args),
-            "itspm_config": asdict(cfg),
+            "heteronet_config": asdict(cfg),
             "elapsed_sec": time.time() - start,
             "source": (
-                "One-for-all ITSPM backbone from parent models/ITSPM.py plus a "
-                "generation task head. The ITSPM architecture is not modified."
+                "One-for-all HeteroNet backbone from parent models/HeteroNet.py plus a "
+                "generation task head. The HeteroNet architecture is not modified."
             ),
             "paper_protocol": "one_for_all_backbone",
             "postprocessing": {
@@ -824,7 +824,7 @@ def train(args: argparse.Namespace) -> dict:
         print(json.dumps(metrics, indent=2, sort_keys=True))
         return result
 
-    ae = ITSPMLatentAutoencoder(cfg, args.seq_len, args.channels, args.latent_dim).to(device)
+    ae = HeteroNetLatentAutoencoder(cfg, args.seq_len, args.channels, args.latent_dim).to(device)
     opt_ae = torch.optim.AdamW(ae.parameters(), lr=args.ae_lr, weight_decay=args.weight_decay)
 
     x_all = torch.from_numpy(obs_data).to(device)
@@ -889,7 +889,7 @@ def train(args: argparse.Namespace) -> dict:
     fake_eval = denormalize(fake, mean, std)
 
     metrics.update({
-        "itspm_latent_diffusion": table1_metrics(test_eval, fake_eval, device, args)
+        "heteronet_latent_diffusion": table1_metrics(test_eval, fake_eval, device, args)
     })
 
     np.save(out_dir / "generated.npy", fake_eval.astype(np.float32))
@@ -900,11 +900,11 @@ def train(args: argparse.Namespace) -> dict:
         "diffmn_table1_reference": diffmn_ref,
         "table1_dataset_available": is_table1_dataset,
         "args": vars(args),
-        "itspm_config": asdict(cfg),
+        "heteronet_config": asdict(cfg),
         "elapsed_sec": time.time() - start,
         "source": (
-            "One-for-all ITSPM backbone from parent models/ITSPM.py plus a "
-            "latent generation task head. The ITSPM architecture is not modified."
+            "One-for-all HeteroNet backbone from parent models/HeteroNet.py plus a "
+            "latent generation task head. The HeteroNet architecture is not modified."
         ),
         "paper_protocol": "one_for_all_backbone",
         "postprocessing": {
@@ -919,13 +919,13 @@ def train(args: argparse.Namespace) -> dict:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser("Irregular time series generation with ITSPM latent diffusion")
+    p = argparse.ArgumentParser("Irregular time series generation with HeteroNet latent diffusion")
     p.add_argument("--gpu", type=str, default="0")
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--dataset", type=str, default="sines",
                    choices=["sine", "sines", "stocks", "energy", "mujoco", "polynomial"])
-    p.add_argument("--generator", type=str, default="itspm_conditioned_diffusion",
-                   choices=["itspm_latent_diffusion", "direct_diffusion", "itspm_conditioned_diffusion"])
+    p.add_argument("--generator", type=str, default="heteronet_conditioned_diffusion",
+                   choices=["heteronet_latent_diffusion", "direct_diffusion", "heteronet_conditioned_diffusion"])
     p.add_argument("--n_samples", type=int, default=1024)
     p.add_argument("--data_root", type=str, default=str(TASK_DIR / "table1_data"))
     p.add_argument("--seq_len", type=int, default=36)

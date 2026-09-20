@@ -16,7 +16,8 @@ logs/
 checkpoints/
 **/checkpoints/
 **/outputs/
-**/itspm_tpp_runs/
+**/results/
+**/heteronet_tpp_runs/
 **/runs/
 wandb/
 *.log
@@ -28,7 +29,7 @@ wandb/
 *.npz
 data/*
 
-# Exactly three bundled datasets and paired CKA reference arrays
+# Exactly three bundled datasets
 !data/activity/
 data/activity/*
 !data/activity/processed/
@@ -38,4 +39,3 @@ data/activity/processed/*
 !Temporal Point Process/taxi/dev.pkl
 !Temporal Point Process/taxi/test.pkl
 !Generation/irregular_generation_diffmn/table1_data/mujoco_training_36.pt
-!results/cka/*/representations.npz

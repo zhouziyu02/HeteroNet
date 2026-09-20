@@ -11,14 +11,14 @@ data:
       pad_token_id: 10
       padding_side: right
       truncation_side: right
-ITSPM_train:
+HeteroNet_train:
   base_config:
     stage: train
     backend: torch
     dataset_id: taxi
     runner_id: std_tpp
-    model_id: ITSPM
-    base_dir: ./checkpoints_itspm_tpp/
+    model_id: HeteroNet
+    base_dir: ./checkpoints_heteronet_tpp/
   trainer_config:
     batch_size: 64
     max_epoch: 2

@@ -1,4 +1,4 @@
-"""Train the fixed Taxi model, select by validation likelihood, then test once.
+"""Train HeteroNet on Taxi, select by validation likelihood, then test once.
 
 Modified from the EasyTPP example for the anonymous supplementary package:
 resolve local paths and reload the validation-best checkpoint before testing.
@@ -41,7 +41,7 @@ def main(argv=None):
     params.update(gpu=-1 if device.type == "cpu" else device.index,
                   max_epoch=args.epochs, batch_size=args.batch_size)
     cfg = make_config("taxi", params, args.seed, "taxi", False)
-    cfg["ITSPM_train"]["base_config"]["base_dir"] = str(args.output_dir.resolve())
+    cfg["HeteroNet_train"]["base_config"]["base_dir"] = str(args.output_dir.resolve())
     for key, filename in (("train_dir", "train.pkl"), ("valid_dir", "dev.pkl")):
         path = args.data_dir.resolve() / filename
         if not path.is_file():
@@ -50,7 +50,7 @@ def main(argv=None):
     test_path = args.data_dir.resolve() / "test.pkl"
     if not test_path.is_file():
         raise FileNotFoundError(test_path)
-    config = RunnerConfig.parse_from_yaml_config(cfg, experiment_id="ITSPM_train")
+    config = RunnerConfig.parse_from_yaml_config(cfg, experiment_id="HeteroNet_train")
     runner = Runner.build_from_config(config)
     runner.run()
     checkpoint = Path(runner.get_model_dir())

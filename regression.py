@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import datetime
 from random import SystemRandom
-from models.ITSPM import ITSPM
+from models.HeteroNet import HeteroNet
 
 
 import torch
@@ -84,7 +84,7 @@ def get_regression_eval_model(model):
 parser = argparse.ArgumentParser('ITS Forecasting')
 
 parser.add_argument('--state', type=str, default='def')
-parser.add_argument('--model', type=str, default='gpt', help='select from [gpt, gpt_patch, warpformer]')
+parser.add_argument('--model', type=str, default='HeteroNet', help='model name (HeteroNet)')
 
 parser.add_argument('--root_path', type=str, default='')
 parser.add_argument('--data_path', type=str, default=str(Path(__file__).resolve().parent / 'data'))
@@ -124,7 +124,7 @@ parser.add_argument('--sample_rate', type=float, default=1.0)
 parser.add_argument('--mask_rate', type=float, default=0.3)
 parser.add_argument('--collate', type=str, default='indseq')
 
-# ITSPM arguments
+# HeteroNet arguments
 parser.add_argument('--n_ref_points', type=int, default=32)
 parser.add_argument('--n_scales', type=int, default=3)
 parser.add_argument('--n_mixer_layers', type=int, default=2)
@@ -176,9 +176,9 @@ if __name__ == '__main__':
 	if not os.path.exists(log_dir):
 		utils.makedirs(log_dir)
 
-	is_itspm = args.model.lower() in ['itspm', 'ipmixer', 'irregularpatternmixer',
-                                       'itspm_b', 'itspm_c', 'itspm_d', 'itspm_e', 'itspm_f', 'itspm_g']
-	logger = utils.get_logger(logpath=log_path, filepath=os.path.abspath(__file__), mode=args.logmode, saving=not is_itspm)
+	is_heteronet = args.model.lower() in ['heteronet', 'ipmixer', 'irregularpatternmixer',
+                                       'heteronet_b', 'heteronet_c', 'heteronet_d', 'heteronet_e', 'heteronet_f', 'heteronet_g']
+	logger = utils.get_logger(logpath=log_path, filepath=os.path.abspath(__file__), mode=args.logmode, saving=not is_heteronet)
 	logger.info(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 	logger.info(input_command)
 	logger.info(args)
@@ -193,10 +193,10 @@ if __name__ == '__main__':
 	args.pred_len = data_obj["max_pred_len"]
 
 	### Model Config ###
-	if args.model.lower() in ['itspm', 'ipmixer', 'irregularpatternmixer']:
-		model = ITSPM(args).to(args.device)
+	if args.model.lower() in ['heteronet', 'ipmixer', 'irregularpatternmixer']:
+		model = HeteroNet(args).to(args.device)
 	else:
-		raise ValueError(f"Unsupported model '{args.model}'. This cleaned project keeps ITSPM only.")
+		raise ValueError(f"Unsupported model '{args.model}'. This cleaned project keeps HeteroNet only.")
 
 	if args.dp_flag:
 		if args.dataset.lower() == 'mimic' and torch.cuda.is_available() and torch.cuda.device_count() > 1:
@@ -216,12 +216,12 @@ if __name__ == '__main__':
 		if test_res is None:
 			return
 		default_res_filename = 'Interpolation/results/Interpolation_results.txt' if args.task == 'imputation' else 'Extrapolation/results/Extrapolation_results.txt'
-		res_filename = os.environ.get("ITSPM_REGRESSION_RESULTS_FILE", default_res_filename)
+		res_filename = os.environ.get("HETERONET_REGRESSION_RESULTS_FILE", default_res_filename)
 		task_name = 'Interpolation' if args.task == 'imputation' else 'Extrapolation'
 
 		# Construct hyperparameter string
 		hparams = []
-		if args.model.lower() in ['itspm', 'ipmixer', 'irregularpatternmixer']:
+		if args.model.lower() in ['heteronet', 'ipmixer', 'irregularpatternmixer']:
 			token_hparams = ""
 			if args.max_event_tokens is not None or args.max_gap_tokens is not None:
 				token_hparams = f", max_event_tokens: {args.max_event_tokens}, max_gap_tokens: {args.max_gap_tokens}"

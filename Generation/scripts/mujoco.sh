@@ -20,8 +20,8 @@ for seq_len in $SEQ_LENS; do
   esac
   if [[ ! -f "$DATA_ROOT/mujoco_training_${seq_len}.pt" ]]; then
     printf 'Missing real MuJoCo data: %s/mujoco_training_%s.pt\n' "$DATA_ROOT" "$seq_len" >&2
-    printf 'From the repository root run: python -m experiments.cka.install_physics\n' >&2
-    printf 'Then: python -m experiments.cka.prepare_mujoco --lengths %s\n' "$seq_len" >&2
+    printf 'From the repository root run: python Generation/scripts/install_physics.py\n' >&2
+    printf 'Then: python Generation/scripts/prepare_mujoco.py --lengths %s\n' "$seq_len" >&2
     exit 2
   fi
 done
@@ -31,7 +31,7 @@ for seq_len in $SEQ_LENS; do
     out_dir="outputs/mujoco/len${seq_len}_miss${missing}_seed${SEED}"
     python3 train_irregular_generation.py \
       --gpu "$GPU" --seed "$SEED" --dataset mujoco \
-      --generator itspm_conditioned_diffusion --data_root "$DATA_ROOT" \
+      --generator heteronet_conditioned_diffusion --data_root "$DATA_ROOT" \
       --n_samples "$N_SAMPLES" --seq_len "$seq_len" --missing "$missing" \
       --batch_size 128 --diff_epochs 200 --diffusion_steps 100 --diffusion_hidden 256 \
       --d_model 96 --n_ref_points 32 --max_event_tokens 64 --max_gap_tokens 32 \
