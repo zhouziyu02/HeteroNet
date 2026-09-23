@@ -1,3 +1,9 @@
+"""Observed-entry autoencoding followed by unconditional latent diffusion.
+
+The generator is trained in two stages. Evaluation sequences are used for
+scoring, not as conditioning inputs to the sampler.
+"""
+
 import argparse
 import json
 import math
@@ -12,7 +18,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from sklearn.metrics import accuracy_score
 from scipy.stats import entropy
 
 
@@ -195,10 +200,34 @@ def load_table1_dataset(args: argparse.Namespace) -> tuple[np.ndarray, np.ndarra
     raise ValueError(f"Unknown dataset: {args.dataset}")
 
 
-def normalize_train_test(data: np.ndarray, train_frac: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def normalize_train_test(
+    data: np.ndarray, train_frac: float, mask: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Fit the additional z-score transform on observed training entries only.
+
+    Dataset loading and benchmark min-max preprocessing are kept separate.
+    Complete reference values are transformed for scoring, never used to fit
+    these statistics or to supervise missing-entry reconstruction.
+    """
+    if data.shape != mask.shape or data.ndim != 3:
+        raise ValueError("data and mask must have the same [N,T,C] shape")
+    if not 0.0 < train_frac < 1.0:
+        raise ValueError("train_frac must leave both training and evaluation sequences")
     split = int(len(data) * train_frac)
-    mean = data[:split].mean(axis=(0, 1), keepdims=True)
-    std = data[:split].std(axis=(0, 1), keepdims=True) + 1e-6
+    if split == 0 or split == len(data):
+        raise ValueError("The split must contain both training and evaluation sequences")
+    observed = mask[:split] > 0
+    count = observed.sum(axis=(0, 1), keepdims=True)
+    if np.any(count == 0):
+        raise ValueError("Each channel needs at least one observed training value")
+    values = np.where(observed, data[:split], 0.0).astype(np.float64)
+    if not np.isfinite(values).all():
+        raise ValueError("Observed training values must be finite")
+    mean = values.sum(axis=(0, 1), keepdims=True) / count
+    centered = np.where(observed, values - mean, 0.0)
+    variance = np.square(centered).sum(axis=(0, 1), keepdims=True) / count
+    mean = mean.astype(np.float32)
+    std = (np.sqrt(variance) + 1e-6).astype(np.float32)
     return (data - mean) / std, mean, std, np.arange(split)
 
 
@@ -220,6 +249,7 @@ class SinTimeEmbedding(nn.Module):
 
 
 class HeteroNetLatentAutoencoder(nn.Module):
+    """Encode irregular training observations; decode latents at query times."""
     def __init__(self, cfg: HeteroNetConfig, seq_len: int, channels: int, latent_dim: int):
         super().__init__()
         self.seq_len = seq_len
@@ -256,6 +286,7 @@ class HeteroNetLatentAutoencoder(nn.Module):
 
 
 class LatentDenoiser(nn.Module):
+    """Noise predictor with no observation- or mask-conditioning interface."""
     def __init__(self, latent_dim: int, hidden: int, n_steps: int):
         super().__init__()
         self.time_emb = nn.Embedding(n_steps, hidden)
@@ -269,70 +300,6 @@ class LatentDenoiser(nn.Module):
 
     def forward(self, z_t: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         return self.net(torch.cat([z_t, self.time_emb(t)], dim=-1))
-
-
-class SequenceDenoiser(nn.Module):
-    def __init__(self, channels: int, hidden: int, n_steps: int):
-        super().__init__()
-        self.time_emb = nn.Embedding(n_steps, hidden)
-        self.in_proj = nn.Conv1d(channels, hidden, 3, padding=1)
-        self.blocks = nn.ModuleList([
-            nn.Sequential(
-                nn.GroupNorm(4, hidden),
-                nn.SiLU(),
-                nn.Conv1d(hidden, hidden, 3, padding=1),
-                nn.GroupNorm(4, hidden),
-                nn.SiLU(),
-                nn.Conv1d(hidden, hidden, 3, padding=1),
-            )
-            for _ in range(4)
-        ])
-        self.t_proj = nn.Linear(hidden, hidden)
-        self.out_proj = nn.Conv1d(hidden, channels, 3, padding=1)
-
-    def forward(self, x_t: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-        h = self.in_proj(x_t.transpose(1, 2))
-        te = self.t_proj(self.time_emb(t)).unsqueeze(-1)
-        for block in self.blocks:
-            h = h + block(h + te)
-        return self.out_proj(h).transpose(1, 2)
-
-
-class HeteroNetConditionedDenoiser(nn.Module):
-    def __init__(self, cfg: HeteroNetConfig, channels: int, hidden: int, n_steps: int):
-        super().__init__()
-        self.heteronet = HeteroNet(cfg)
-        self.time_emb = nn.Embedding(n_steps, hidden)
-        self.cond_proj = nn.Linear(cfg.d_model, hidden)
-        self.in_proj = nn.Conv1d(channels * 3, hidden, 3, padding=1)
-        self.blocks = nn.ModuleList([
-            nn.Sequential(
-                nn.GroupNorm(4, hidden),
-                nn.SiLU(),
-                nn.Conv1d(hidden, hidden, 3, padding=1),
-                nn.GroupNorm(4, hidden),
-                nn.SiLU(),
-                nn.Conv1d(hidden, hidden, 3, padding=1),
-            )
-            for _ in range(4)
-        ])
-        self.out_proj = nn.Conv1d(hidden, channels, 3, padding=1)
-
-    def forward(
-        self,
-        x_t: torch.Tensor,
-        t: torch.Tensor,
-        obs: torch.Tensor,
-        mask: torch.Tensor,
-        obs_times: torch.Tensor,
-    ) -> torch.Tensor:
-        cond = self.cond_proj(self.heteronet(obs_times, obs, mask)).unsqueeze(-1)
-        te = self.time_emb(t).unsqueeze(-1)
-        denoise_in = torch.cat([x_t, obs, mask], dim=-1)
-        h = self.in_proj(denoise_in.transpose(1, 2))
-        for block in self.blocks:
-            h = h + block(h + cond + te)
-        return self.out_proj(h).transpose(1, 2)
 
 
 class LatentDDPM:
@@ -366,165 +333,110 @@ class LatentDDPM:
         return z
 
 
-class SequenceDDPM(LatentDDPM):
-    @torch.no_grad()
-    def sample_sequence(self, denoiser: SequenceDenoiser, n_samples: int, seq_len: int, channels: int) -> torch.Tensor:
-        x = torch.randn(n_samples, seq_len, channels, device=self.device)
-        for step in reversed(range(self.n_steps)):
-            t = torch.full((n_samples,), step, dtype=torch.long, device=self.device)
-            eps = denoiser(x, t)
-            beta = self.betas[step]
-            alpha = self.alphas[step]
-            ab = self.alpha_bar[step]
-            x = (x - beta / torch.sqrt(1.0 - ab) * eps) / torch.sqrt(alpha)
-            if step > 0:
-                x = x + torch.sqrt(beta) * torch.randn_like(x)
-        return x
-
-    @torch.no_grad()
-    def sample_conditioned(
-        self,
-        denoiser: HeteroNetConditionedDenoiser,
-        obs: torch.Tensor,
-        mask: torch.Tensor,
-        obs_times: torch.Tensor,
-        clamp_observed: bool,
-    ) -> torch.Tensor:
-        n_samples, seq_len, channels = obs.shape
-        x = torch.randn(n_samples, seq_len, channels, device=self.device)
-        if clamp_observed:
-            x = x * (1.0 - mask) + obs * mask
-        for step in reversed(range(self.n_steps)):
-            t = torch.full((n_samples,), step, dtype=torch.long, device=self.device)
-            eps = denoiser(x, t, obs, mask, obs_times)
-            beta = self.betas[step]
-            alpha = self.alphas[step]
-            ab = self.alpha_bar[step]
-            x = (x - beta / torch.sqrt(1.0 - ab) * eps) / torch.sqrt(alpha)
-            if step > 0:
-                x = x + torch.sqrt(beta) * torch.randn_like(x)
-            if clamp_observed:
-                x = x * (1.0 - mask) + obs * mask
-        return x
+def observed_reconstruction_loss(
+    reconstruction: torch.Tensor, observed_values: torch.Tensor, mask: torch.Tensor,
+) -> torch.Tensor:
+    """Reconstruction MSE evaluated strictly at observed training entries."""
+    if reconstruction.shape != observed_values.shape or mask.shape != reconstruction.shape:
+        raise ValueError("Reconstruction, observations, and mask must share a shape")
+    observed = mask > 0
+    if not observed.any():
+        raise ValueError("Reconstruction requires at least one observed entry")
+    # Select before subtraction: unobserved values (including NaNs) never enter
+    # the loss, and the decoder receives no gradient at those positions.
+    return F.mse_loss(reconstruction[observed], observed_values[observed])
 
 
-def train_direct_diffusion(
-    args: argparse.Namespace,
-    train_data: np.ndarray,
-    test_data: np.ndarray,
-    device: torch.device,
-) -> tuple[np.ndarray, dict, nn.Module]:
-    ddpm = SequenceDDPM(args.diffusion_steps, args.beta_start, args.beta_end, device)
-    denoiser = SequenceDenoiser(args.channels, args.diffusion_hidden, args.diffusion_steps).to(device)
-    opt = torch.optim.AdamW(denoiser.parameters(), lr=args.diff_lr, weight_decay=args.weight_decay)
-    x_train = torch.from_numpy(train_data.astype(np.float32)).to(device)
-    for epoch in range(1, args.diff_epochs + 1):
-        losses = []
-        denoiser.train()
-        for ids_np in iter_batches(len(train_data), args.batch_size, True, args.seed + epoch):
-            x0 = x_train[torch.as_tensor(ids_np, device=device)]
-            tt = torch.randint(0, args.diffusion_steps, (x0.size(0),), device=device)
-            noise = torch.randn_like(x0)
-            xt = ddpm.q_sample(x0, tt, noise)
-            opt.zero_grad(set_to_none=True)
-            loss = F.mse_loss(denoiser(xt, tt), noise)
-            loss.backward()
-            opt.step()
-            losses.append(float(loss.detach().cpu()))
-        if epoch == 1 or epoch % max(1, args.log_every) == 0:
-            print(f"direct_diff_epoch={epoch:03d} loss={np.mean(losses):.6f}")
+def freeze_autoencoder(autoencoder: HeteroNetLatentAutoencoder) -> None:
+    autoencoder.eval()
+    autoencoder.requires_grad_(False)
+    for parameter in autoencoder.parameters():
+        parameter.grad = None
+
+
+def standardize_training_latents(
+    latents: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if latents.ndim != 2 or len(latents) == 0 or not torch.isfinite(latents).all():
+        raise ValueError("Expected a nonempty, finite [N,latent_dim] training tensor")
+    mean = latents.mean(dim=0, keepdim=True)
+    # Population statistics stay finite even for a one-sequence training set.
+    std = latents.std(dim=0, keepdim=True, unbiased=False) + 1e-6
+    return (latents - mean) / std, mean, std
+
+
+@torch.no_grad()
+def sample_sequences(
+    autoencoder: HeteroNetLatentAutoencoder,
+    denoiser: LatentDenoiser,
+    diffusion: LatentDDPM,
+    n_samples: int,
+    latent_mean: torch.Tensor,
+    latent_std: torch.Tensor,
+    seq_len: int | None = None,
+) -> torch.Tensor:
+    """Generate in normalized data space using noise and learned parameters.
+
+    The optional sequence length defines the regular output-time grid. This
+    interface deliberately accepts no reference observations or masks.
+    """
+    if n_samples < 1:
+        raise ValueError("n_samples must be positive")
+    autoencoder.eval()
     denoiser.eval()
-    fake = ddpm.sample_sequence(denoiser, len(test_data), args.seq_len, args.channels).detach().cpu().numpy()
-    metrics = {
-        "discriminative": discriminative_score(test_data, fake, device, args.disc_epochs),
-        "mmd": rbf_mmd(test_data, fake),
-        "acf_error": acf_error(test_data, fake),
-        "marginal_error": marginal_error(test_data, fake),
-    }
-    return fake, metrics, denoiser
+    z = diffusion.sample(denoiser, n_samples, latent_mean.shape[-1])
+    z = z * latent_std + latent_mean
+    return autoencoder.decode(z, seq_len=seq_len)
 
 
-def train_heteronet_conditioned_diffusion(
-    args: argparse.Namespace,
-    cfg: HeteroNetConfig,
-    data: np.ndarray,
-    obs_data: np.ndarray,
-    mask: np.ndarray,
-    times: np.ndarray,
-    train_data: np.ndarray,
-    test_data: np.ndarray,
-    split: int,
-    device: torch.device,
-) -> tuple[np.ndarray, dict, nn.Module]:
-    ddpm = SequenceDDPM(args.diffusion_steps, args.beta_start, args.beta_end, device)
-    denoiser = HeteroNetConditionedDenoiser(cfg, args.channels, args.diffusion_hidden, args.diffusion_steps).to(device)
-    opt = torch.optim.AdamW(denoiser.parameters(), lr=args.diff_lr, weight_decay=args.weight_decay)
-    x_all = torch.from_numpy(data.astype(np.float32)).to(device)
-    obs_all = torch.from_numpy(obs_data.astype(np.float32)).to(device)
-    mask_all = torch.from_numpy(mask.astype(np.float32)).to(device)
-    times_all = torch.from_numpy(times.astype(np.float32)).to(device)
-    for epoch in range(1, args.diff_epochs + 1):
-        losses = []
-        denoiser.train()
-        for ids_np in iter_batches(split, args.batch_size, True, args.seed + 2000 + epoch):
-            ids = torch.as_tensor(ids_np, device=device)
-            x0 = x_all[ids]
-            tt = torch.randint(0, args.diffusion_steps, (x0.size(0),), device=device)
-            noise = torch.randn_like(x0)
-            xt = ddpm.q_sample(x0, tt, noise)
-            opt.zero_grad(set_to_none=True)
-            pred_noise = denoiser(xt, tt, obs_all[ids], mask_all[ids], times_all[ids])
-            loss = F.mse_loss(pred_noise, noise)
-            if args.x0_loss_weight > 0 or args.marginal_loss_weight > 0:
-                x0_pred = ddpm.predict_x0(xt, tt, pred_noise)
-                if args.x0_loss_weight > 0:
-                    loss = loss + args.x0_loss_weight * F.mse_loss(x0_pred, x0)
-                if args.marginal_loss_weight > 0:
-                    pred_mean = x0_pred.mean(dim=(0, 1))
-                    true_mean = x0.mean(dim=(0, 1))
-                    pred_std = x0_pred.std(dim=(0, 1))
-                    true_std = x0.std(dim=(0, 1))
-                    marginal_loss = F.mse_loss(pred_mean, true_mean) + F.mse_loss(pred_std, true_std)
-                    loss = loss + args.marginal_loss_weight * marginal_loss
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(denoiser.parameters(), 1.0)
-            opt.step()
-            losses.append(float(loss.detach().cpu()))
-        if epoch == 1 or epoch % max(1, args.log_every) == 0:
-            print(f"heteronet_cond_diff_epoch={epoch:03d} loss={np.mean(losses):.6f}")
-
-    denoiser.eval()
-    test_slice = slice(split, len(data))
-    with torch.no_grad():
-        fake = ddpm.sample_conditioned(
-            denoiser,
-            obs_all[test_slice],
-            mask_all[test_slice],
-            times_all[test_slice],
-            args.clamp_observed,
-        ).detach().cpu().numpy()
-    metrics = {
-        "discriminative": discriminative_score(test_data, fake, device, args.disc_epochs),
-        "mmd": rbf_mmd(test_data, fake),
-        "acf_error": acf_error(test_data, fake),
-        "marginal_error": marginal_error(test_data, fake),
-        "observed_mse": float(((fake - test_data) ** 2 * mask[split:]).sum() / (mask[split:].sum() + 1e-6)),
-        "missing_mse": float(((fake - test_data) ** 2 * (1.0 - mask[split:])).sum() / ((1.0 - mask[split:]).sum() + 1e-6)),
-    }
-    return fake, metrics, denoiser
+def save_generation_checkpoint(
+    path: Path, autoencoder: HeteroNetLatentAutoencoder, denoiser: LatentDenoiser,
+    cfg: HeteroNetConfig, args: argparse.Namespace, mean: np.ndarray, std: np.ndarray,
+    latent_mean: torch.Tensor, latent_std: torch.Tensor,
+) -> None:
+    """Save everything needed to sample without loading a reference dataset."""
+    torch.save({
+        "format_version": 1,
+        "generator": "heteronet_latent_diffusion",
+        "autoencoder": autoencoder.state_dict(),
+        "denoiser": denoiser.state_dict(),
+        "heteronet_config": asdict(cfg),
+        "args": vars(args),
+        "normalization": {
+            "data_mean": torch.from_numpy(mean.copy()),
+            "data_std": torch.from_numpy(std.copy()),
+            "latent_mean": latent_mean.detach().cpu(),
+            "latent_std": latent_std.detach().cpu(),
+        },
+    }, path)
 
 
-
-
-class Discriminator(nn.Module):
-    def __init__(self, channels: int, hidden: int):
-        super().__init__()
-        self.gru = nn.GRU(channels, hidden, batch_first=True)
-        self.head = nn.Linear(hidden, 1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        _, h = self.gru(x)
-        return self.head(h[-1]).squeeze(-1)
+@torch.no_grad()
+def sample_from_checkpoint(
+    path: Path, n_samples: int, device: torch.device, seed: int | None = None,
+) -> np.ndarray:
+    """Sample directly from a latent-head checkpoint; no data loader is used."""
+    checkpoint = torch.load(path, map_location=device, weights_only=True)
+    if (checkpoint.get("format_version") != 1
+            or checkpoint.get("generator") != "heteronet_latent_diffusion"):
+        raise ValueError("Expected a latent-head checkpoint with normalization statistics")
+    cfg = HeteroNetConfig(**checkpoint["heteronet_config"])
+    args = argparse.Namespace(**checkpoint["args"])
+    autoencoder = HeteroNetLatentAutoencoder(cfg, args.seq_len, args.channels, args.latent_dim).to(device)
+    autoencoder.load_state_dict(checkpoint["autoencoder"])
+    freeze_autoencoder(autoencoder)
+    denoiser = LatentDenoiser(args.latent_dim, args.diffusion_hidden, args.diffusion_steps).to(device)
+    denoiser.load_state_dict(checkpoint["denoiser"])
+    diffusion = LatentDDPM(args.diffusion_steps, args.beta_start, args.beta_end, device)
+    if seed is not None:
+        set_seed(seed)
+    stats = checkpoint["normalization"]
+    generated = sample_sequences(
+        autoencoder, denoiser, diffusion, n_samples,
+        stats["latent_mean"].to(device), stats["latent_std"].to(device),
+    )
+    generated = generated * stats["data_std"].to(device) + stats["data_mean"].to(device)
+    return generated.cpu().numpy().astype(np.float32)
 
 
 def rbf_mmd(x: np.ndarray, y: np.ndarray, max_samples: int = 512) -> float:
@@ -580,35 +492,6 @@ def acf_error(real: np.ndarray, fake: np.ndarray, max_lag: int = 8) -> float:
         f = (fake[:, :-lag] * fake[:, lag:]).mean(axis=(0, 1))
         errs.append(np.abs(r - f).mean())
     return float(np.mean(errs))
-
-
-def marginal_error(real: np.ndarray, fake: np.ndarray) -> float:
-    return float(np.abs(real.mean(axis=(0, 1)) - fake.mean(axis=(0, 1))).mean() +
-                 np.abs(real.std(axis=(0, 1)) - fake.std(axis=(0, 1))).mean())
-
-
-def discriminative_score(real: np.ndarray, fake: np.ndarray, device: torch.device, epochs: int = 20) -> float:
-    n = min(len(real), len(fake))
-    x = np.concatenate([real[:n], fake[:n]], axis=0).astype(np.float32)
-    y = np.concatenate([np.ones(n), np.zeros(n)], axis=0).astype(np.float32)
-    rng = np.random.default_rng(0)
-    idx = rng.permutation(len(x))
-    split = int(0.7 * len(x))
-    tr, te = idx[:split], idx[split:]
-    model = Discriminator(real.shape[-1], 32).to(device)
-    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
-    xb = torch.from_numpy(x).to(device)
-    yb = torch.from_numpy(y).to(device)
-    for _ in range(epochs):
-        model.train()
-        opt.zero_grad(set_to_none=True)
-        loss = F.binary_cross_entropy_with_logits(model(xb[tr]), yb[tr])
-        loss.backward()
-        opt.step()
-    model.eval()
-    with torch.no_grad():
-        pred = (torch.sigmoid(model(xb[te])) > 0.5).detach().cpu().numpy().astype(np.float32)
-    return float(abs(accuracy_score(y[te], pred) - 0.5))
 
 
 def table1_discriminative_score(
@@ -683,27 +566,6 @@ def baseline_gaussian(train: np.ndarray, n_samples: int, seed: int) -> np.ndarra
     return rng.normal(mu, std, size=(n_samples, flat.shape[1])).astype(np.float32).reshape(n_samples, *train.shape[1:])
 
 
-def calibrate_marginals(fake: np.ndarray, train: np.ndarray) -> np.ndarray:
-    fake_mean = fake.mean(axis=(0, 1), keepdims=True)
-    fake_std = fake.std(axis=(0, 1), keepdims=True) + 1e-6
-    train_mean = train.mean(axis=(0, 1), keepdims=True)
-    train_std = train.std(axis=(0, 1), keepdims=True) + 1e-6
-    return ((fake - fake_mean) / fake_std * train_std + train_mean).astype(np.float32)
-
-
-def calibrate_missing_marginals(fake: np.ndarray, train: np.ndarray, obs: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    calibrated = fake.copy()
-    train_mean = train.mean(axis=(0, 1))
-    train_std = train.std(axis=(0, 1)) + 1e-6
-    for c in range(fake.shape[-1]):
-        missing = mask[:, :, c] < 0.5
-        if not np.any(missing):
-            continue
-        values = calibrated[:, :, c][missing]
-        calibrated[:, :, c][missing] = (values - values.mean()) / (values.std() + 1e-6) * train_std[c] + train_mean[c]
-    return (calibrated * (1.0 - mask) + obs * mask).astype(np.float32)
-
-
 def iter_batches(n: int, batch_size: int, shuffle: bool, seed: int):
     idx = np.arange(n)
     if shuffle:
@@ -714,6 +576,8 @@ def iter_batches(n: int, batch_size: int, shuffle: bool, seed: int):
 
 
 def train(args: argparse.Namespace) -> dict:
+    if args.generator != "heteronet_latent_diffusion":
+        raise ValueError("This entry point implements the observed-only latent generation head")
     start = time.time()
     if args.gpu != "cpu":
         os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
@@ -722,11 +586,13 @@ def train(args: argparse.Namespace) -> dict:
 
     data, mask, is_table1_dataset = load_table1_dataset(args)
     args.channels = data.shape[-1]
-    data, mean, std, train_ids = normalize_train_test(data, args.train_frac)
+    data, mean, std, train_ids = normalize_train_test(data, args.train_frac, mask)
     split = len(train_ids)
     train_data = data[:split]
     test_data = data[split:]
-    obs_data = data * mask
+    # Materialize only observed training inputs. Evaluation sequences remain
+    # outside the encoder and the generator's two training stages.
+    obs_train = np.where(mask[:split] > 0, train_data, 0.0).astype(np.float32)
     times = np.broadcast_to(np.linspace(0.0, 1.0, args.seq_len, dtype=np.float32), data.shape[:2]).copy()
 
     table1_dataset = "sines" if args.dataset == "sine" else args.dataset
@@ -735,7 +601,6 @@ def train(args: argparse.Namespace) -> dict:
         metric: DIFF_MN_TABLE1[metric].get(missing_key, {}).get(table1_dataset)
         for metric in ("ds", "mdd", "kl")
     }
-    train_eval = denormalize(train_data, mean, std)
     test_eval = denormalize(test_data, mean, std)
     gauss = baseline_gaussian(train_data, len(test_data), args.seed + 99)
     gauss_eval = denormalize(gauss, mean, std)
@@ -756,81 +621,12 @@ def train(args: argparse.Namespace) -> dict:
         max_gap_tokens=args.max_gap_tokens,
     )
 
-    if args.generator == "direct_diffusion":
-        fake, direct_metrics, denoiser = train_direct_diffusion(args, train_data, test_data, device)
-        if args.calibrate_marginals:
-            fake = calibrate_marginals(fake, train_data)
-            fake_eval = denormalize(fake, mean, std)
-            direct_metrics = table1_metrics(test_eval, fake_eval, device, args)
-        else:
-            fake_eval = denormalize(fake, mean, std)
-            direct_metrics = table1_metrics(test_eval, fake_eval, device, args)
-        metrics["direct_sequence_diffusion"] = direct_metrics
-        np.save(out_dir / "generated.npy", fake_eval.astype(np.float32))
-        np.save(out_dir / "real_test.npy", test_eval.astype(np.float32))
-        torch.save({"denoiser": denoiser.state_dict()}, out_dir / "model.pt")
-        result = {
-            "metrics": metrics,
-            "diffmn_table1_reference": diffmn_ref,
-            "table1_dataset_available": is_table1_dataset,
-            "args": vars(args),
-            "elapsed_sec": time.time() - start,
-            "source": "Task-local direct sequence diffusion upper-bound inspired by TimeCraft Diff-MN.",
-            "paper_protocol": "upper_bound_not_heteronet",
-        }
-        with open(out_dir / "results.json", "w", encoding="utf-8") as f:
-            json.dump(result, f, indent=2, sort_keys=True)
-        print(json.dumps(metrics, indent=2, sort_keys=True))
-        return result
-
-    if args.generator == "heteronet_conditioned_diffusion":
-        fake, cond_metrics, denoiser = train_heteronet_conditioned_diffusion(
-            args, cfg, data, obs_data, mask, times, train_data, test_data, split, device)
-        if args.calibrate_marginals:
-            if args.clamp_observed:
-                fake = calibrate_missing_marginals(fake, train_data, obs_data[split:], mask[split:])
-            else:
-                fake = calibrate_marginals(fake, train_data)
-        fake_eval = denormalize(fake, mean, std)
-        obs_eval = denormalize(obs_data[split:], mean, std)
-        cond_metrics = table1_metrics(test_eval, fake_eval, device, args)
-        cond_metrics["observed_mse"] = float(((fake - test_data) ** 2 * mask[split:]).sum() / (mask[split:].sum() + 1e-6))
-        cond_metrics["missing_mse"] = float(((fake - test_data) ** 2 * (1.0 - mask[split:])).sum() / ((1.0 - mask[split:]).sum() + 1e-6))
-        metrics["heteronet_conditioned_diffusion"] = cond_metrics
-        np.save(out_dir / "generated.npy", fake_eval.astype(np.float32))
-        np.save(out_dir / "real_test.npy", test_eval.astype(np.float32))
-        np.save(out_dir / "observed_test.npy", obs_eval.astype(np.float32))
-        np.save(out_dir / "mask_test.npy", mask[split:].astype(np.float32))
-        torch.save({"denoiser": denoiser.state_dict()}, out_dir / "model.pt")
-        result = {
-            "metrics": metrics,
-            "diffmn_table1_reference": diffmn_ref,
-            "table1_dataset_available": is_table1_dataset,
-            "args": vars(args),
-            "heteronet_config": asdict(cfg),
-            "elapsed_sec": time.time() - start,
-            "source": (
-                "One-for-all HeteroNet backbone from parent models/HeteroNet.py plus a "
-                "generation task head. The HeteroNet architecture is not modified."
-            ),
-            "paper_protocol": "one_for_all_backbone",
-            "postprocessing": {
-                "marginal_calibration": bool(args.calibrate_marginals),
-                "observed_value_clamping": bool(args.clamp_observed),
-            },
-        }
-        with open(out_dir / "results.json", "w", encoding="utf-8") as f:
-            json.dump(result, f, indent=2, sort_keys=True)
-        print(json.dumps(metrics, indent=2, sort_keys=True))
-        return result
-
     ae = HeteroNetLatentAutoencoder(cfg, args.seq_len, args.channels, args.latent_dim).to(device)
     opt_ae = torch.optim.AdamW(ae.parameters(), lr=args.ae_lr, weight_decay=args.weight_decay)
 
-    x_all = torch.from_numpy(obs_data).to(device)
-    m_all = torch.from_numpy(mask).to(device)
-    t_all = torch.from_numpy(times).to(device)
-    y_all = torch.from_numpy(data).to(device)
+    x_train = torch.from_numpy(obs_train).to(device)
+    m_train = torch.from_numpy(mask[:split]).to(device)
+    t_train = torch.from_numpy(times[:split].copy()).to(device)
 
     for epoch in range(1, args.ae_epochs + 1):
         losses = []
@@ -838,10 +634,8 @@ def train(args: argparse.Namespace) -> dict:
         for ids_np in iter_batches(split, args.batch_size, True, args.seed + epoch):
             ids = torch.as_tensor(ids_np, device=device)
             opt_ae.zero_grad(set_to_none=True)
-            recon, _ = ae(t_all[ids], x_all[ids], m_all[ids])
-            loss_obs = ((recon - y_all[ids]).pow(2) * m_all[ids]).sum() / (m_all[ids].sum() + 1e-6)
-            loss_full = F.mse_loss(recon, y_all[ids])
-            loss = loss_obs + args.full_recon_weight * loss_full
+            recon, _ = ae(t_train[ids], x_train[ids], m_train[ids])
+            loss = observed_reconstruction_loss(recon, x_train[ids], m_train[ids])
             loss.backward()
             torch.nn.utils.clip_grad_norm_(ae.parameters(), 1.0)
             opt_ae.step()
@@ -849,16 +643,15 @@ def train(args: argparse.Namespace) -> dict:
         if epoch == 1 or epoch % max(1, args.log_every) == 0:
             print(f"ae_epoch={epoch:03d} loss={np.mean(losses):.6f}")
 
-    ae.eval()
+    freeze_autoencoder(ae)
+    del opt_ae
     latents = []
     with torch.no_grad():
         for ids_np in iter_batches(split, args.batch_size, False, args.seed):
             ids = torch.as_tensor(ids_np, device=device)
-            latents.append(ae.encode(t_all[ids], x_all[ids], m_all[ids]).detach().cpu())
+            latents.append(ae.encode(t_train[ids], x_train[ids], m_train[ids]).detach().cpu())
     z_train = torch.cat(latents, dim=0).to(device)
-    z_mean = z_train.mean(0, keepdim=True)
-    z_std = z_train.std(0, keepdim=True) + 1e-6
-    z_norm = (z_train - z_mean) / z_std
+    z_norm, z_mean, z_std = standardize_training_latents(z_train)
 
     ddpm = LatentDDPM(args.diffusion_steps, args.beta_start, args.beta_end, device)
     denoiser = LatentDenoiser(args.latent_dim, args.diffusion_hidden, args.diffusion_steps).to(device)
@@ -879,13 +672,7 @@ def train(args: argparse.Namespace) -> dict:
         if epoch == 1 or epoch % max(1, args.log_every) == 0:
             print(f"diff_epoch={epoch:03d} loss={np.mean(losses):.6f}")
 
-    denoiser.eval()
-    ae.eval()
-    with torch.no_grad():
-        z_fake = ddpm.sample(denoiser, len(test_data), args.latent_dim) * z_std + z_mean
-        fake = ae.decode(z_fake).detach().cpu().numpy()
-    if args.calibrate_marginals:
-        fake = calibrate_marginals(fake, train_data)
+    fake = sample_sequences(ae, denoiser, ddpm, len(test_data), z_mean, z_std).cpu().numpy()
     fake_eval = denormalize(fake, mean, std)
 
     metrics.update({
@@ -894,7 +681,7 @@ def train(args: argparse.Namespace) -> dict:
 
     np.save(out_dir / "generated.npy", fake_eval.astype(np.float32))
     np.save(out_dir / "real_test.npy", test_eval.astype(np.float32))
-    torch.save({"autoencoder": ae.state_dict(), "denoiser": denoiser.state_dict()}, out_dir / "model.pt")
+    save_generation_checkpoint(out_dir / "model.pt", ae, denoiser, cfg, args, mean, std, z_mean, z_std)
     result = {
         "metrics": metrics,
         "diffmn_table1_reference": diffmn_ref,
@@ -906,9 +693,19 @@ def train(args: argparse.Namespace) -> dict:
             "One-for-all HeteroNet backbone from parent models/HeteroNet.py plus a "
             "latent generation task head. The HeteroNet architecture is not modified."
         ),
-        "paper_protocol": "one_for_all_backbone",
+        "paper_protocol": "observed_reconstruction_then_latent_diffusion",
+        "training": {
+            "reconstruction_scope": "observed_training_entries",
+            "autoencoder_frozen_during_diffusion": True,
+            "latent_statistics_scope": "training_latents",
+        },
+        "sampling": {
+            "initial_state": "gaussian_noise",
+            "evaluation_observations_used": False,
+            "latent_inverse_standardization": True,
+        },
         "postprocessing": {
-            "marginal_calibration": bool(args.calibrate_marginals),
+            "marginal_calibration": False,
             "observed_value_clamping": False,
         },
     }
@@ -924,8 +721,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--dataset", type=str, default="sines",
                    choices=["sine", "sines", "stocks", "energy", "mujoco", "polynomial"])
-    p.add_argument("--generator", type=str, default="heteronet_conditioned_diffusion",
-                   choices=["heteronet_latent_diffusion", "direct_diffusion", "heteronet_conditioned_diffusion"])
+    p.add_argument("--generator", type=str, default="heteronet_latent_diffusion",
+                   choices=["heteronet_latent_diffusion"])
     p.add_argument("--n_samples", type=int, default=1024)
     p.add_argument("--data_root", type=str, default=str(TASK_DIR / "table1_data"))
     p.add_argument("--seq_len", type=int, default=36)
@@ -935,25 +732,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--batch_size", type=int, default=64)
     p.add_argument("--ae_epochs", type=int, default=40)
     p.add_argument("--diff_epochs", type=int, default=80)
-    p.add_argument("--disc_epochs", type=int, default=20)
     p.add_argument("--ds_iterations", type=int, default=2000)
     p.add_argument("--ds_batch_size", type=int, default=128)
     p.add_argument("--mdd_bins", type=int, default=20)
     p.add_argument("--ae_lr", type=float, default=1e-3)
     p.add_argument("--diff_lr", type=float, default=1e-3)
     p.add_argument("--weight_decay", type=float, default=1e-5)
-    p.add_argument("--full_recon_weight", type=float, default=0.25)
-    p.add_argument("--x0_loss_weight", type=float, default=0.0,
-                   help="Optional training-time x0 reconstruction loss for the generation head.")
-    p.add_argument("--marginal_loss_weight", type=float, default=0.0,
-                   help="Optional training-time batch mean/std matching loss for the generation head.")
     p.add_argument("--latent_dim", type=int, default=32)
     p.add_argument("--diffusion_steps", type=int, default=50)
     p.add_argument("--diffusion_hidden", type=int, default=128)
-    p.add_argument("--calibrate_marginals", action="store_true",
-                   help="Optional post-hoc marginal calibration. Use only as an ablation, not as the default paper protocol.")
-    p.add_argument("--clamp_observed", action=argparse.BooleanOptionalAction, default=False,
-                   help="Optionally preserve observed values during conditional sampling. Disabled by default for one-for-all reporting.")
     p.add_argument("--beta_start", type=float, default=1e-4)
     p.add_argument("--beta_end", type=float, default=0.02)
     p.add_argument("--d_model", type=int, default=64)
