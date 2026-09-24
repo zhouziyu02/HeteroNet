@@ -10,6 +10,21 @@ __pycache__/
 .env.*
 *.pem
 *.key
+*.zip
+*.tar
+*.tar.gz
+*.patch
+*.bundle
+*.orig
+*.bak
+.idea/
+.vscode/
+.codex/
+.agents/
+.claude/
+.mcp.json
+AGENTS.md
+CLAUDE.md
 
 # Generated runs and downloaded data
 logs/

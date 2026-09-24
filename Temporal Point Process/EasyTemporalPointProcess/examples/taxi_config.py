@@ -15,7 +15,7 @@ FINAL_GRID_BY_DATASET = {"taxi": [{
 def make_config(dataset, params, seed, run_id, include_test):
     """Keep the original selected Taxi architecture and optimizer parameters."""
     if dataset != "taxi":
-        raise ValueError("This supplementary package includes the Taxi experiment only.")
+        raise ValueError("This entry point supports the Taxi experiment only.")
     with (ROOT / "examples" / "configs" / "heteronet_tpp_config.yaml").open() as stream:
         cfg = yaml.safe_load(stream)
     exp = cfg["HeteroNet_train"]

@@ -1,7 +1,7 @@
 {
   "dataset": "MuJoCo HopperPhysics",
   "provenance": "regenerated_physical_simulation",
-  "source_url": "https://github.com/microsoft/TimeCraft/blob/main/Diff-MN/datasets/mujoco_physics.py",
+  "source": "TimeCraft: Diff-MN/datasets/mujoco_physics.py",
   "source_license": "MIT",
   "n_trajectories": 4620,
   "seq_len": 36,

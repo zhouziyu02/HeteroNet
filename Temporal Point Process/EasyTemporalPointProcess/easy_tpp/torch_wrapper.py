@@ -1,6 +1,6 @@
 """Initialize a PyTorch model wrapper that feeds into Model Runner.
 
-Modified for the anonymous supplement: import TensorBoard only when enabled.
+Modified: import TensorBoard only when enabled.
 """
 
 import torch

@@ -1,4 +1,4 @@
-# Fixed Taxi experiment; unrelated dataset entries were removed for this supplement.
+# Base Taxi configuration; taxi_config.py applies the launch settings.
 pipeline_config_id: runner_config
 data:
   taxi:

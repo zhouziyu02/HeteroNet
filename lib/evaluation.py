@@ -237,7 +237,7 @@ def compute_mse(mu, data, mask = None):
 
 def compute_poisson_proc_likelihood(truth, pred_y, info, mask = None):
 	# Compute Poisson likelihood
-	# https://math.stackexchange.com/questions/344487/log-likelihood-of-a-realization-of-a-poisson-process
+	# Event log intensities minus the integrated rate.
 	# Sum log lambdas across all time points
 	if mask is None:
 		poisson_log_l = torch.sum(info["log_lambda_y"], 2) - info["int_lambda"]
