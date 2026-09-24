@@ -1,3 +1,4 @@
+# Modified: replace external documentation links with local descriptions.
 import importlib.util
 import sys
 from collections import OrderedDict
@@ -88,15 +89,13 @@ def torch_only_method(fn):
 
 # docstyle-ignore
 PYTORCH_IMPORT_ERROR = """
-{0} requires the PyTorch library but it was not found in your environment. Checkout the instructions on the
-installation page: https://pytorch.org/get-started/locally/ and follow the ones that match your environment.
+{0} requires PyTorch. Install a version matching your Python and CUDA environment.
 Please note that you may need to restart your runtime after installation.
 """
 
 # docstyle-ignore
 TORCHVISION_IMPORT_ERROR = """
-{0} requires the Torchvision library but it was not found in your environment. Checkout the instructions on the
-installation page: https://pytorch.org/get-started/locally/ and follow the ones that match your environment.
+{0} requires Torchvision. Install a version matching your PyTorch environment.
 Please note that you may need to restart your runtime after installation.
 """
 

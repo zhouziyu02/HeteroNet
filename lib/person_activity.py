@@ -10,15 +10,12 @@ import numpy as np
 import tarfile
 import torch
 from torch.utils.data import DataLoader
-from torchvision.datasets.utils import download_url
 from lib.utils import get_device
 
-# Adapted from: https://github.com/rtqichen/time-series-datasets
+# Adapted from time-series-datasets. Modified to preprocess local files only.
 
 class PersonActivity(object):
-	urls = [
-		'https://archive.ics.uci.edu/ml/machine-learning-databases/00196/ConfLongDemo_JSI.txt',
-	]
+	raw_files = ('ConfLongDemo_JSI.txt',)
 
 	tag_ids = [
 		"010-000-024-033", #"ANKLE_LEFT",
@@ -76,7 +73,7 @@ class PersonActivity(object):
 				self.download()
 
 			if not self._check_exists():
-				raise RuntimeError('Dataset not found. You can use download=True to download it')
+				raise RuntimeError('Dataset not found. Supply processed/data.pt or place the Activity text file in raw/.')
 			path = os.path.join(self.processed_folder, self.data_file)
 
 		# Cached tensors may have been saved on a different CPU/GPU device.
@@ -87,8 +84,12 @@ class PersonActivity(object):
 			self.data = self.data[:n_samples]
 
 	def download(self):
+		"""Preprocess local raw files; retain the upstream method name for compatibility."""
 		if self._check_exists():
 			return
+		for filename in self.raw_files:
+			if not os.path.isfile(os.path.join(self.raw_folder, filename)):
+				raise FileNotFoundError(f'Missing local Activity data: {os.path.join(self.raw_folder, filename)}. See README.md.')
 
 		os.makedirs(self.raw_folder, exist_ok=True)
 		os.makedirs(self.processed_folder, exist_ok=True)
@@ -110,9 +111,7 @@ class PersonActivity(object):
 			records.append((record_id, tt, vals, mask))
 
 
-		for url in self.urls:
-			filename = url.rpartition('/')[2]
-			download_url(url, self.raw_folder, filename, None)
+		for filename in self.raw_files:
 
 			print('Processing {}...'.format(filename))
 
@@ -186,13 +185,7 @@ class PersonActivity(object):
 		print('Done!')
 
 	def _check_exists(self):
-		for url in self.urls:
-			filename = url.rpartition('/')[2]
-			if not os.path.exists(
-				os.path.join(self.processed_folder, 'data.pt')
-			):
-				return False
-		return True
+		return os.path.isfile(os.path.join(self.processed_folder, 'data.pt'))
 
 	@property
 	def raw_folder(self):

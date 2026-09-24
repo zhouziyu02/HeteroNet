@@ -1,7 +1,6 @@
 """Regenerate real HopperPhysics trajectories using the Diff-MN data recipe.
 
-Source (Microsoft MIT-licensed implementation):
-https://github.com/microsoft/TimeCraft/blob/main/Diff-MN/datasets/mujoco_physics.py
+Source: TimeCraft, Diff-MN/datasets/mujoco_physics.py (Microsoft MIT license).
 This uses the real Hopper physics model; no synthetic proxy is substituted.
 Regenerated data are explicitly labelled and versioned; they are not claimed
 to be a bit-for-bit reconstruction of another dataset release.
@@ -64,7 +63,7 @@ def main() -> None:
         torch.save(torch.from_numpy(data[:, :length].copy()), path)
         metadata = {
             'dataset': 'MuJoCo HopperPhysics', 'provenance': 'regenerated_physical_simulation',
-            'source_url': 'https://github.com/microsoft/TimeCraft/blob/main/Diff-MN/datasets/mujoco_physics.py',
+            'source': 'TimeCraft: Diff-MN/datasets/mujoco_physics.py',
             'source_license': 'MIT', 'n_trajectories': args.n_trajectories,
             'seq_len': length, 'channels': 14, 'data_seed': args.data_seed,
             'dm_control_version': importlib.metadata.version('dm-control'),

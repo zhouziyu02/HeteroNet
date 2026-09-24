@@ -1,6 +1,6 @@
 """Train HeteroNet on Taxi, select by validation likelihood, then test once.
 
-Modified from the EasyTPP example for the anonymous supplementary package:
+Modified from the EasyTPP example:
 resolve local paths and reload the validation-best checkpoint before testing.
 """
 import argparse

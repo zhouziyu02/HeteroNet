@@ -1,3 +1,4 @@
+# Modified: replace external documentation links with local descriptions.
 import torch
 import torch.nn as nn
 from easy_tpp.utils import logger
@@ -6,9 +7,9 @@ from easy_tpp.utils import logger
 class EventSampler(nn.Module):
     """Event Sequence Sampler based on thinning algorithm, which corresponds to Algorithm 2 of
     The Neural Hawkes Process: A Neurally Self-Modulating Multivariate Point Process,
-    https://arxiv.org/abs/1612.09328.
+    arXiv:1612.09328.
 
-    The implementation uses code from https://github.com/yangalan123/anhp-andtt/blob/master/anhp/esm/thinning.py.
+    The implementation uses the ANHP-andtt event sampler (anhp/esm/thinning.py).
     """
 
     def __init__(self, num_sample, num_exp, over_sample_rate, num_samples_boundary, dtime_max, patience_counter,
@@ -103,7 +104,7 @@ class EventSampler(nn.Module):
 
         # [batch_size, seq_len, num_exp]
         # div by sample_rate is equivalent to exp(sample_rate),
-        # see https://en.wikipedia.org/wiki/Exponential_distribution
+        # Draw unit-rate exponential variables before applying the sample rate.
         exp_numbers = exp_numbers / sample_rate[:, :, None]
 
         return exp_numbers

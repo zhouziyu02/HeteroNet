@@ -15,18 +15,13 @@ import tarfile
 import torch
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
-from torchvision.datasets.utils import download_url
 from lib.utils import get_device
 
-# Adapted from: https://github.com/rtqichen/time-series-datasets
+# Adapted from time-series-datasets. Modified to preprocess local files only.
 
 class PhysioNet(object):
 
-	urls = [
-		'https://physionet.org/files/challenge-2012/1.0.0/set-a.tar.gz?download',
-		'https://physionet.org/files/challenge-2012/1.0.0/set-b.tar.gz?download',
-		'https://physionet.org/files/challenge-2012/1.0.0/set-c.tar.gz?download',
-	]
+	raw_files = ('set-a.tar.gz', 'set-b.tar.gz', 'set-c.tar.gz')
 
 	params = [
 		'Age', 'Gender', 'Height', 'ICUType', 'Weight', 'Albumin', 'ALP', 'ALT', 'AST', 'Bilirubin', 'BUN',
@@ -57,7 +52,7 @@ class PhysioNet(object):
 				self.download()
 
 			if not self._check_exists():
-				raise RuntimeError('Dataset not found. You can use download=True to download it')
+				raise RuntimeError('Dataset not found. Supply the processed PhysioNet tensors or local archives in raw/.')
 			folder = self.processed_folder
 
 		data_a = torch.load(os.path.join(folder, self.set_a), map_location=self.device, weights_only=True)
@@ -71,16 +66,18 @@ class PhysioNet(object):
 			self.data = self.data[:n_samples]
 
 	def download(self):
+		"""Preprocess local archives; retain the upstream method name for compatibility."""
 		if self._check_exists():
 			return
+		for filename in self.raw_files:
+			if not os.path.isfile(os.path.join(self.raw_folder, filename)):
+				raise FileNotFoundError(f'Missing local PhysioNet data: {os.path.join(self.raw_folder, filename)}. See README.md.')
 
 		os.makedirs(self.raw_folder, exist_ok=True)
 		os.makedirs(self.processed_folder, exist_ok=True)
 
 		black_list = [140501, 150649, 140936, 143656, 141264, 145611, 142998, 147514, 142731,150309, 155655, 156254]
-		for url in self.urls:
-			filename = url.rpartition('/')[2]
-			download_url(url, self.raw_folder, filename, None)
+		for filename in self.raw_files:
 			tar = tarfile.open(os.path.join(self.raw_folder, filename), "r:gz")
 			tar.extractall(self.raw_folder)
 			tar.close()
@@ -151,8 +148,7 @@ class PhysioNet(object):
 		print('Done!')
 
 	def _check_exists(self):
-		for url in self.urls:
-			filename = url.rpartition('/')[2]
+		for filename in self.raw_files:
 
 			if not os.path.exists(
 				os.path.join(self.processed_folder,

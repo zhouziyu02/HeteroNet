@@ -1,3 +1,4 @@
+# Modified: replace external documentation links with local descriptions.
 import math
 from typing import Dict
 
@@ -55,7 +56,7 @@ class TPPDataset(Dataset):
             s_2_y = dts.var()
             m = dts.shape[0]
             n += m
-            # Formula taken from https://math.stackexchange.com/questions/3604607/can-i-work-out-the-variance-in-batches
+            # Combine within-sequence and between-sequence squared deviations.
             s_2_x = (((n - 1) * s_2_x + (m - 1) * s_2_y) / (n + m - 1)) + (
                         (n * m * ((x_bar - y_bar) ** 2)) / ((n + m) * (n + m - 1)))
             x_bar = (n * x_bar + m * y_bar) / (n + m)

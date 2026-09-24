@@ -56,4 +56,4 @@ __all__ = ['py_assert',
            'is_numpy_array',
            'save_json',
            'load_json']
-# Modified for the anonymous supplement: omit unused ODE and synthetic-data exports.
+# Modified: omit unused ODE and synthetic-data exports.

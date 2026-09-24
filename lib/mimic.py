@@ -84,9 +84,7 @@ class MIMIC(object):
 
 class ITSDataset(Dataset):
     """
-    Dataset class for irregular data, originally taken from
-    https://github.com/edebrouwer/gru_ode_bayes
-    and modified
+    Dataset class for irregular data, adapted from GRU-ODE-Bayes.
     """
     def __init__(self, in_df, validation=False, val_options=None):
         """
@@ -167,7 +165,7 @@ class ITSDataset(Dataset):
 def collate_GOB(batch):
     """
     Collate function used in the DataLoader to format data for GRU-ODE-Bayes,
-    taken from https://github.com/edebrouwer/gru_ode_bayes
+    adapted from GRU-ODE-Bayes.
     """
     df = pd.concat([b['path'] for b in batch], axis=0)
     df.reset_index(inplace=True)

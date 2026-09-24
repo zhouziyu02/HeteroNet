@@ -1,3 +1,4 @@
+# Modified: replace external documentation links with local descriptions.
 """ Base model with common functionality  """
 
 import torch
@@ -67,7 +68,6 @@ class TorchBaseModel(nn.Module):
             batch_non_pad_mask (tensor): [batch_size, seq_len], a sequence of masks
             sample_len (tensor): default None, use batch_non_pad_mask to find out the last non-mask position
 
-        ref: https://medium.com/analytics-vidhya/understanding-indexing-with-pytorch-gather-33717a84ebc4
 
         Returns:
             tensor: retrieve the logits of EOS event

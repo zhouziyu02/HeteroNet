@@ -43,7 +43,7 @@ class TPPRunner(Runner):
             num_params = count_model_params(self.model)
 
         else:
-            raise ValueError("This supplementary package supports the PyTorch backend only.")
+            raise ValueError("This runner supports the PyTorch backend only.")
 
         info_msg = f'Num of model parameters {num_params}'
         logger.info(info_msg)
@@ -212,4 +212,4 @@ class TPPRunner(Runner):
             metrics_dict.update({'pred': epoch_pred, 'label': epoch_label})
 
         return metrics_dict
-# Modified for the anonymous supplement: remove the unavailable TensorFlow branch.
+# Modified: remove the unavailable TensorFlow branch.
