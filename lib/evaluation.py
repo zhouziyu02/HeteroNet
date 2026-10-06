@@ -1,6 +1,6 @@
 ###########################
 # Latent ODEs for Irregularly-Sampled Time Series
-# Author: Yulia Rubanova
+# Original upstream author: Yulia Rubanova (Latent ODE; see THIRD_PARTY_NOTICES.md).
 ###########################
 
 import gc
