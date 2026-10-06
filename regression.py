@@ -48,18 +48,18 @@ class BatchOnlyDataParallel(nn.DataParallel):
 		n_devices = min(len(device_ids), observed_data.size(0))
 		device_ids = device_ids[:n_devices]
 
-		data_chunks = observed_data.chunk(n_devices, dim=0)
-		tp_chunks = observed_tp.chunk(n_devices, dim=0) if observed_tp.dim() > 1 and observed_tp.size(0) == observed_data.size(0) else None
+		data_chunks = observed_data.tensor_split(n_devices, dim=0)
+		tp_chunks = observed_tp.tensor_split(n_devices, dim=0) if observed_tp.dim() > 1 and observed_tp.size(0) == observed_data.size(0) else None
 		mask_chunks = None
 		if observed_mask is not None and observed_mask.dim() > 1 and observed_mask.size(0) == observed_data.size(0):
-			mask_chunks = observed_mask.chunk(n_devices, dim=0)
+			mask_chunks = observed_mask.tensor_split(n_devices, dim=0)
 
 		scattered_inputs = []
 		for idx, device_id in enumerate(device_ids):
 			device = torch.device("cuda", device_id)
 			local_tp_to_predict = tp_to_predict
 			if tp_to_predict.dim() > 1 and tp_to_predict.size(0) == observed_data.size(0):
-				local_tp_to_predict = tp_to_predict.chunk(n_devices, dim=0)[idx]
+				local_tp_to_predict = tp_to_predict.tensor_split(n_devices, dim=0)[idx]
 
 			local_observed_tp = tp_chunks[idx] if tp_chunks is not None else observed_tp
 			local_observed_mask = mask_chunks[idx] if mask_chunks is not None else observed_mask
@@ -80,6 +80,20 @@ def get_regression_eval_model(model):
 	if isinstance(model, BatchOnlyDataParallel):
 		return model.module.backbone
 	return model
+
+
+def load_regression_checkpoint(path, model):
+	if not os.path.isfile(path):
+		raise FileNotFoundError(f'Regression checkpoint not found: {path}')
+	checkpoint = torch.load(path, map_location='cpu', weights_only=True)
+	get_regression_eval_model(model).load_state_dict(checkpoint['model_state_dict'])
+	return checkpoint
+
+
+def save_regression_checkpoint(path, model, epoch):
+	Path(path).parent.mkdir(parents=True, exist_ok=True)
+	torch.save({'model_state_dict': get_regression_eval_model(model).state_dict(),
+	            'epoch': epoch}, path)
 
 parser = argparse.ArgumentParser('ITS Forecasting')
 
@@ -104,10 +118,10 @@ parser.add_argument('--save_path', type=str, default='./save/')
 parser.add_argument('--seed', type=int, default=0)
 parser.add_argument('--patience', type=int, default=10)
 parser.add_argument('--weight_decay', type=float, default=1e-5)
-parser.add_argument('--load_path', type=str, default=None)
+parser.add_argument('--load_path', type=str, default=None, help='Path to a saved regression checkpoint.')
 parser.add_argument('--test_only', action='store_true')
 parser.add_argument('--logmode', type=str, default="a", help='File mode of logging.')
-parser.add_argument('--task', type=str, default='nan')
+parser.add_argument('--task', type=str, required=True, choices=['imputation', 'forecasting'])
 
 parser.add_argument('--debug_flag', action='store_true')
 parser.add_argument('--dp_flag', action='store_true')
@@ -115,8 +129,8 @@ parser.add_argument('--load_in_batch', action='store_true')
 parser.add_argument('--history', type=int, default=24, help="number of hours (or months for ushcn) as historical window")
 parser.add_argument('--retrain', action='store_true')
 parser.add_argument('--median_len', type=int, default=50)
-parser.add_argument('--load', type=str, default=None, help="ID of the experiment to load for evaluation. If None, run a new experiment.")
-parser.add_argument('--dataset', type=str, default='physionet', help="Dataset to load. Available: physionet, mimic, ushcn")
+parser.add_argument('--load', type=str, default=None, help='Experiment ID for logs and checkpoint filenames; use --load_path to restore a model.')
+parser.add_argument('--dataset', type=str, default='physionet', choices=['physionet', 'mimic', 'ushcn', 'activity'])
 parser.add_argument('--quantization', type=float, default=0.0, help="Quantization on the physionet dataset.")
 
 parser.add_argument('--max_len', type=int, default=-1)
@@ -141,6 +155,14 @@ file_name = os.path.basename(__file__)[:-3]
 if __name__ == '__main__':
 
 	args = parser.parse_args()
+	if args.epoch <= 0 or args.batch_size <= 0 or args.history <= 0:
+		parser.error('--epoch, --batch_size, and --history must be positive.')
+	if not 0 < args.mask_rate < 1:
+		parser.error('--mask_rate must be in (0, 1).')
+	if args.test_only and args.load_path is None:
+		parser.error('--test_only requires --load_path.')
+	if args.load_path is not None and not os.path.isfile(args.load_path):
+		parser.error(f'Checkpoint not found: {args.load_path}')
 	os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
 	args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 	args.PID = os.getpid()
@@ -205,6 +227,10 @@ if __name__ == '__main__':
 		else:
 			print("[Info] --dp_flag ignored: multi-GPU regression is only enabled for MIMIC with >1 visible CUDA device.")
 
+	loaded_checkpoint = load_regression_checkpoint(args.load_path, model) if args.load_path else None
+	checkpoint_path = os.path.join(args.root_path, args.save_path,
+	                               f'{args.task}_{args.dataset}_{args.model}_{args.state}_{experimentID}.pt')
+
 	### Optimizer ###
 	optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 	scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.5)
@@ -246,10 +272,18 @@ if __name__ == '__main__':
 			res_f.write(f"Time now: {time_now_str}, Time for training: {training_time_str}\n\n")
 
 	best_val_mse = np.inf
+	best_iter = -1
 	test_res = None
 	total_start_time = time.time()
+	if args.test_only:
+		eval_model = get_regression_eval_model(model)
+		eval_model.eval()
+		with torch.no_grad():
+			test_res = evaluation(eval_model, data_obj['test_dataloader'], data_obj['n_test_batches'])
+		best_iter = loaded_checkpoint.get('epoch', 0)
+		print(f"Test MSE: {test_res['mse']:.5f} Test MAE: {test_res['mae']:.5f}")
 
-	for itr in range(args.epoch):
+	for itr in range(0 if args.test_only else args.epoch):
 		st = time.time()
 		epoch_train_losses = []
 		iter_count = 0
@@ -262,6 +296,8 @@ if __name__ == '__main__':
 			# utils.update_learning_rate(optimizer, decay_rate = 0.999, lowest = args.lr / 10)
 			batch_dict = utils.get_next_batch(data_obj["train_dataloader"])
 			train_res = compute_all_losses(model, batch_dict, args.dataset)
+			if not torch.isfinite(train_res['loss']):
+				raise FloatingPointError('Regression loss is not finite.')
 			train_res["loss"].backward()
 			optimizer.step()
 
@@ -286,11 +322,15 @@ if __name__ == '__main__':
 		eval_model.eval()
 		with torch.no_grad():
 			val_res = evaluation(eval_model, data_obj["val_dataloader"], data_obj["n_val_batches"])
+			if not np.isfinite(val_res['mse']):
+				raise FloatingPointError('Validation MSE is not finite.')
 
 			### Testing ###
 			if(val_res["mse"] < best_val_mse):
 				best_val_mse = val_res["mse"]
 				best_iter = itr
+				save_regression_checkpoint(checkpoint_path, model, itr)
+				print(f'[Info] Saved best checkpoint: {checkpoint_path}')
 				test_res = evaluation(eval_model, data_obj["test_dataloader"], data_obj["n_test_batches"])
 
 			vali_loss = val_res["loss"]

@@ -26,9 +26,9 @@ class TorchModelWrapper:
         self.model_id = self.base_config.model_id
         # Sometimes PyTorch may not switch the active device context for all operations
         # This causes illegal memory access error
-        if self.trainer_config.gpu!=-1:
-            torch.cuda.set_device(self.trainer_config.gpu)
         self.device = set_device(self.trainer_config.gpu)
+        if self.device.type == 'cuda':
+            torch.cuda.set_device(self.device)
 
         self.model.to(self.device)
 
@@ -52,7 +52,8 @@ class TorchModelWrapper:
             ckpt_dir (str): path for the checkpoint.
         """
 
-        self.model.load_state_dict(torch.load(ckpt_dir), strict=False)
+        state = torch.load(ckpt_dir, map_location=self.device, weights_only=True)
+        self.model.load_state_dict(state, strict=True)
 
     def save(self, ckpt_dir):
         """Save the checkpoint for the model.
@@ -120,6 +121,10 @@ class TorchModelWrapper:
             # run model
             with torch.set_grad_enabled(grad_flag):
                 loss, num_event = self.model.loglike_loss(batch)
+            if num_event < 1:
+                raise ValueError("A likelihood batch must contain at least one non-padding target event.")
+            if not torch.isfinite(loss):
+                raise FloatingPointError("The batch likelihood is not finite.")
 
             # Assume we dont do prediction on train set
             pred_dtime, pred_type, label_dtime, label_type, mask = None, None, None, None, None
@@ -136,13 +141,15 @@ class TorchModelWrapper:
                         if batch[1] is not None and batch[2] is not None:
                             label_dtime, label_type = batch[1][:, 1:].cpu().numpy(), batch[2][:, 1:].cpu().numpy()
                         if batch[3] is not None:
-                            mask = batch[3][:, 1:].cpu().numpy()
+                            mask = (batch[3][:, 1:] & batch[3][:, :-1]).cpu().numpy()
                         pred_dtime, pred_type = self.model.predict_one_step_at_every_event(batch=batch)
                         pred_dtime = pred_dtime.detach().cpu().numpy()
                         pred_type = pred_type.detach().cpu().numpy()
             return loss.item(), num_event, (pred_dtime, pred_type), (label_dtime, label_type), (mask,)
         else:
-            pred_dtime, pred_type, label_dtime, label_type = self.model.predict_multi_step_since_last_event(batch=batch)
+            self.model.eval()
+            with torch.no_grad():
+                pred_dtime, pred_type, label_dtime, label_type = self.model.predict_multi_step_since_last_event(batch=batch)
             pred_dtime = pred_dtime.detach().cpu().numpy()
             pred_type = pred_type.detach().cpu().numpy()
             label_dtime = label_dtime.detach().cpu().numpy()

@@ -477,7 +477,7 @@ class FastSparsePatternTokenizer(nn.Module):
 class PatternInteraction(nn.Module):
     """
     Type-wise pooling + gated fusion + variable relation MLP.
-    No attention, no transformer.
+    Optional transformer token mixing followed by pooled summaries.
 
     Token types: 0=event, 1=gap, 2=var_summary
 
@@ -797,14 +797,22 @@ class HeteroNet(nn.Module):
     def _prepare_tp(self, tp: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """Expand tp to [B, L, C] if it is [B, L]."""
         B, L, C = mask.shape
+        if tp.dim() not in (2, 3) or tp.shape[:2] != (B, L):
+            raise ValueError('Timestamps must have shape [B, L], [B, L, 1], or [B, L, C].')
         if tp.dim() == 2:
             tp = tp.unsqueeze(-1).expand(B, L, C)
         elif tp.dim() == 3 and tp.size(-1) == 1 and C > 1:
             tp = tp.expand(B, L, C)
+        if tp.shape != mask.shape:
+            raise ValueError('The timestamp channel count must match the observation channels.')
         return tp
 
     def _encode(self, X, tp, mask):
         """Full encode -> pattern tokens."""
+        if X.dim() != 3 or X.shape != mask.shape or X.shape[1] == 0:
+            raise ValueError('Data and mask must have the same nonempty shape [B, L, C].')
+        if X.shape[2] != self.num_channels:
+            raise ValueError('The input channel count does not match input_dim.')
         tp = self._prepare_tp(tp, mask)
         tp_min, tp_max = self.encoder.compute_time_range(tp, mask)
         event_emb, t_norm = self.encoder.encode(X, tp, mask, tp_min, tp_max)
@@ -854,6 +862,8 @@ class HeteroNet(nn.Module):
         Returns: [1, B, Lp, C]
         """
         B, L, C = observed_data.shape
+        if tp_to_predict.dim() not in (2, 3) or tp_to_predict.shape[0] != B:
+            raise ValueError('Prediction timestamps must include the same batch dimension as observations.')
         if observed_mask is None:
             observed_mask = torch.ones_like(observed_data)
 
@@ -869,9 +879,12 @@ class HeteroNet(nn.Module):
             Lp = tp_to_predict.shape[1]
             tp_pred_norm = (tp_to_predict.unsqueeze(-1) - tp_min) / denom
             tp_pred_norm = tp_pred_norm.expand(B, Lp, C)
-        else:
+        elif tp_to_predict.dim() == 3 and tp_to_predict.shape[0] == B and tp_to_predict.shape[2] in (1, C):
             Lp = tp_to_predict.shape[1]
             tp_pred_norm = (tp_to_predict - tp_min) / denom
+            tp_pred_norm = tp_pred_norm.expand(B, Lp, C)
+        else:
+            raise ValueError('Prediction timestamps must have shape [B, Lp], [B, Lp, 1], or [B, Lp, C].')
 
         residual = self.readout(
             query_time   = tp_pred_norm,   # [B, Lp, C]

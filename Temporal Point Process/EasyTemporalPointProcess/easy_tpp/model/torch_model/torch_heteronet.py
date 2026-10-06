@@ -245,9 +245,12 @@ class _SparseTokenizer(nn.Module):
 
 
 class _PatternInteraction(nn.Module):
-    def __init__(self, num_channels, d_model, dropout, n_layers, n_heads):
+    def __init__(self, num_channels, d_model, dropout, n_layers, n_heads,
+                 max_event_tokens, max_gap_tokens):
         super().__init__()
         self.num_channels = num_channels
+        self.max_event_tokens = max_event_tokens
+        self.max_gap_tokens = max_gap_tokens
         if n_layers > 0:
             n_heads = max(1, min(n_heads, d_model))
             while d_model % n_heads != 0 and n_heads > 1:
@@ -279,17 +282,18 @@ class _PatternInteraction(nn.Module):
     def forward(self, tokens, token_mask):
         if self.mixer is not None:
             tokens = tokens + self.mixer(tokens, src_key_padding_mask=~token_mask.bool())
-        type_masks = [
-            token_mask[:, : -self.num_channels],
-            token_mask[:, : -self.num_channels],
-            token_mask[:, -self.num_channels :],
+        event_end = self.max_event_tokens
+        gap_end = event_end + self.max_gap_tokens
+        if tokens.size(1) != gap_end + self.num_channels:
+            raise ValueError("Token sequence length does not match the event, gap, and variable blocks.")
+        type_blocks = [
+            (tokens[:, :event_end], token_mask[:, :event_end]),
+            (tokens[:, event_end:gap_end], token_mask[:, event_end:gap_end]),
+            (tokens[:, gap_end:], token_mask[:, gap_end:]),
         ]
-        event_tokens = tokens[:, : -self.num_channels]
-        var_tokens = tokens[:, -self.num_channels :]
         pooled = [
-            self.type_proj[0](torch.cat([_masked_mean(event_tokens, type_masks[0], 1), _masked_max(event_tokens, type_masks[0], 1)], -1)),
-            self.type_proj[1](torch.cat([_masked_mean(event_tokens, type_masks[1], 1), _masked_max(event_tokens, type_masks[1], 1)], -1)),
-            self.type_proj[2](torch.cat([var_tokens.mean(1), var_tokens.max(1).values], -1)),
+            projection(torch.cat([_masked_mean(block, mask, 1), _masked_max(block, mask, 1)], -1))
+            for projection, (block, mask) in zip(self.type_proj, type_blocks)
         ]
         fused = self.fusion(torch.cat(pooled, dim=-1))
         global_mean = _masked_mean(tokens, token_mask.bool(), 1)
@@ -307,6 +311,8 @@ class HeteroNet(TorchBaseModel):
         self.window_size = int(specs.get('window_size', 32))
         self.max_event_tokens = int(specs.get('max_event_tokens', max(16, self.window_size)))
         self.max_gap_tokens = int(specs.get('max_gap_tokens', max(8, self.window_size // 2)))
+        if min(self.window_size, self.max_event_tokens, self.max_gap_tokens) < 1:
+            raise ValueError("Window size and token limits must be positive.")
         self.head_type = str(specs.get('head_type', 'decay_mlp'))
         self.time_emb_size = int(specs.get('time_emb_size', self.d_model))
         n_layers = int(specs.get('n_mixer_layers', model_config.num_layers))
@@ -321,7 +327,10 @@ class HeteroNet(TorchBaseModel):
             self.max_gap_tokens,
             dropout,
         )
-        self.interaction = _PatternInteraction(self.num_event_types, self.d_model, dropout, n_layers, n_heads)
+        self.interaction = _PatternInteraction(
+            self.num_event_types, self.d_model, dropout, n_layers, n_heads,
+            self.max_event_tokens, self.max_gap_tokens,
+        )
         self.sample_time_emb = _SinTimeEmbedding(self.time_emb_size)
         head_in = self.d_model + self.time_emb_size
         if self.head_type == 'linear_decay':
@@ -381,6 +390,8 @@ class HeteroNet(TorchBaseModel):
 
     def loglike_loss(self, batch):
         time_seqs, time_delta_seqs, type_seqs, batch_non_pad_mask, attention_mask = batch
+        if time_seqs.size(1) < 2:
+            raise ValueError("Likelihood training requires a sequence with at least two events.")
         enc_out = self.forward(time_seqs[:, :-1], type_seqs[:, :-1], None)
         event_dtimes = time_delta_seqs[:, 1:]
         lambda_at_event = self.softplus(self.compute_states_at_sample_times(enc_out, event_dtimes.unsqueeze(-1)).squeeze(2))
@@ -390,7 +401,7 @@ class HeteroNet(TorchBaseModel):
             time_delta_seq=event_dtimes,
             lambda_at_event=lambda_at_event,
             lambdas_loss_samples=lambda_t_sample,
-            seq_mask=batch_non_pad_mask[:, 1:],
+            seq_mask=batch_non_pad_mask[:, 1:] & batch_non_pad_mask[:, :-1],
             type_seq=type_seqs[:, 1:],
         )
         return -(event_ll - non_event_ll).sum(), num_events
@@ -398,6 +409,9 @@ class HeteroNet(TorchBaseModel):
     def compute_intensities_at_sample_times(self, time_seqs, time_delta_seqs, type_seqs, sample_dtimes, **kwargs):
         compute_last_step_only = kwargs.get('compute_last_step_only', False)
         enc_out = self.forward(time_seqs, type_seqs, None)
+        if compute_last_step_only:
+            enc_out = enc_out[:, -1:]
+            sample_dtimes = sample_dtimes[:, -1:]
         states = self.compute_states_at_sample_times(enc_out, sample_dtimes)
         lambdas = self.softplus(states)
-        return lambdas[:, -1:, :, :] if compute_last_step_only else lambdas
+        return lambdas

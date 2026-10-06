@@ -1,7 +1,9 @@
 # HeteroNet
 
-Python 3.11+ and a CUDA GPU. Install dependencies, prepare the local data
-listed below, and run from the repository root:
+The task scripts default to a CUDA GPU. Python 3.11 is verified; CPU execution
+is also available for interface checks and small runs. Install a matching
+PyTorch/torchvision pair for your device, then install dependencies, prepare
+the local data listed below, and run from the repository root:
 
 ```bash
 pip install -r requirements.txt
@@ -20,6 +22,12 @@ bash Generation/scripts/energy.sh         # external CSV
 Use `GPU=0 SEED=1 bash ...` to override a script's defaults. Architecture,
 training budgets, and checkpoint selection are defined by the task scripts
 and their entry points. The TPP entry point currently covers Taxi only.
+Classification and regression normalization statistics use the training
+split. Checkpoints are selected by validation metrics. Regression saves the
+best checkpoint under `save/` by default; use `--test_only --load_path PATH`
+with the same dataset, task, and model configuration to evaluate it.
+Regression reports and excludes windows without observed inputs or prediction
+targets after assigning records to their data splits.
 
 Generation trains an encoder/decoder on observed entries, freezes them, and
 fits a DDPM to standardized training latents. Sampling uses noise and saved
@@ -27,6 +35,9 @@ normalization statistics, without evaluation observations or marginal
 calibration. Published comparison constants are reference values, not runs
 of this implementation; checkpoints and scores from a different head are
 not interchangeable.
+The reported `gaussian_baseline` fits all training values, including values
+hidden by the artificial observation mask. It is a complete-data reference
+baseline and does not follow the generator's observed-only input protocol.
 
 ## Local data
 
@@ -64,5 +75,21 @@ local files only. To preprocess raw Activity or PhysioNet data, place
 `ConfLongDemo_JSI.txt` in `data/activity/raw/`, or `set-{a,b,c}.tar.gz` in
 `data/physionet/raw/`, respectively. Missing files produce an explicit error.
 
-Generation interface checks: `python3 -m unittest discover -s Generation/tests -v`.
 Third-party attribution and license locations are in `THIRD_PARTY_NOTICES.md`.
+
+## Small checks
+
+Run the CPU regression checks from the repository root:
+
+```bash
+python3 -m unittest discover -s tests -v
+python3 -m unittest discover -s Generation/tests -v
+python3 -m unittest discover -s "Temporal Point Process/EasyTemporalPointProcess/tests" -v
+```
+
+These cover input shapes, masks, metrics, checkpoint loading, and small
+training/sampling runs. They do not reproduce full training budgets or verify
+published benchmark scores. Corrections to normalization, metrics, and TPP
+pooling can change results relative to earlier code versions. The checks were
+run with Python 3.11,
+PyTorch 2.3.1, NumPy 1.26.1, and scikit-learn 1.5.2.

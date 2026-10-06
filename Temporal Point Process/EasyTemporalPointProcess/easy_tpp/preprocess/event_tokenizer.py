@@ -320,6 +320,7 @@ class EventTokenizer:
                                         truncation_strategy=truncation_strategy,
                                         max_length=max_length,
                                         truncation_side=self.truncation_side)
+        required_input = encoded_inputs[self.model_input_names[0]]
 
         batch_size = len(required_input)
         assert all(
@@ -410,7 +411,10 @@ class EventTokenizer:
         # non_pad_mask; replaced the use of event types by using the original sequence length
         seq_pad_mask = np.full_like(batch_output[self.model_input_names[2]], fill_value=True, dtype=bool)
         for i, seq_len in enumerate(seq_lens):
-            seq_pad_mask[i, seq_len:] = False
+            if self.padding_side == 'left':
+                seq_pad_mask[i, :seq_pad_mask.shape[1] - seq_len] = False
+            else:
+                seq_pad_mask[i, seq_len:] = False
         batch_output[self.model_input_names[3]] = seq_pad_mask
 
         if return_attention_mask:

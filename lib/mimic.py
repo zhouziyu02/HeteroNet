@@ -49,7 +49,7 @@ class MIMIC(object):
             tt = torch.tensor(data['Time'].values).to(self.device).float() / 60.
             vals = torch.tensor(data[value_cols].values).to(self.device).float()
             mask = torch.tensor(data[mask_cols].values).to(self.device).float()
-            patients.append((record_id, tt, vals, mask))
+            patients.append((str(record_id), tt, vals, mask))
 
         torch.save(
             patients,

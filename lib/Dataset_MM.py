@@ -19,7 +19,7 @@ Constants_PAD = 0
 
 def get_data_loader(data_x, data_y, args, shuffle=False):
     data_combined = TensorDataset(torch.from_numpy(data_x).float(),
-                                        torch.from_numpy(data_y).long().squeeze())
+                                        torch.from_numpy(data_y).long().reshape(-1))
     dataloader = DataLoader(
         data_combined, batch_size=args.batch_size, shuffle=shuffle,num_workers=8)
 
@@ -60,7 +60,7 @@ def getStats(P_tensor):
         vals_f = vals_f[vals_f > 0]
         if len(vals_f) > 0:
             mf[f] = torch.mean(vals_f)
-            tmp_std = torch.std(vals_f)
+            tmp_std = torch.std(vals_f) if len(vals_f) > 1 else vals_f.new_tensor(1.)
             stdf[f] = max(tmp_std, eps)
     return mf, stdf
 
@@ -68,10 +68,10 @@ def getStats(P_tensor):
 def normalize(P_tensor, mf, stdf):
     """ Normalize time series variables. Missing ones are set to zero after normalization. """
     N, T, F = P_tensor.shape
-    Pf = P_tensor.transpose((2, 0, 1)).reshape(F, -1)
+    Pf = P_tensor.permute(2, 0, 1).reshape(F, -1)
     for f in range(F):
         Pf[f] = (Pf[f]-mf[f])/(stdf[f]+1e-18)
-    Pnorm_tensor = Pf.reshape((F, N, T)).transpose((1, 2, 0))
+    Pnorm_tensor = Pf.reshape((F, N, T)).permute(1, 2, 0)
     return Pnorm_tensor
 
 def imputation(vals, mask):
@@ -115,7 +115,8 @@ def get_data_mean_std(records, device):
         non_missing_vals = all_vals[:, i][all_masks[:, i] == 1]
         if len(non_missing_vals) > 0:
             data_mean[i] = non_missing_vals.mean()
-            data_std[i] = non_missing_vals.std()
+            if len(non_missing_vals) > 1:
+                data_std[i] = non_missing_vals.std().clamp_min(1e-8)
     return data_mean, data_std, time_max
 
 
@@ -175,9 +176,10 @@ def variable_time_collate_fn_vector(batch, args, device, input_dim, return_np=Fa
     #     len_tt = [ex[1].size(0) for ex in batch]
     #     maxlen = np.max(len_tt)
 
+    seq_lens = [ex[1].size(0) for ex in batch]
     if maxlen is None:
-        seq_lens = [ex[1].size(0) for ex in batch]
         maxlen = int(np.max(seq_lens))
+    maxlen = max(1, maxlen)
 
     enc_combined_tt = torch.zeros([len(batch), maxlen]).to(device)
     enc_combined_vals = torch.zeros([len(batch), maxlen, D]).to(device)
@@ -209,9 +211,9 @@ def variable_time_collate_fn_vector(batch, args, device, input_dim, return_np=Fa
     if args.fillmiss:
         enc_combined_vals = imputation(enc_combined_vals, enc_combined_mask)
     combined_data = torch.cat(
-        (enc_combined_vals, enc_combined_mask, enc_combined_tt.unsqueeze(-1)), 2)
+        (enc_combined_vals, enc_combined_mask, enc_combined_tt.unsqueeze(-1).expand(-1, -1, D)), 2)
 
-    return combined_data, combined_labels, torch.tensor(seq_lens).to(device)
+    return combined_data, combined_labels, torch.tensor(seq_lens).clamp(1, maxlen).to(device)
 
 
 
@@ -232,13 +234,11 @@ def variable_time_collate_fn_indseq(batch, args, device, input_dim, return_np=Fa
     D = batch[0][2].shape[-1]
     # number of labels
     # N = batch[0][-1].shape[1] if activity else 1
+    seq_lens = ([ex[3].sum(dim=0).max().item() for ex in batch] if not activity
+                else [ex[1].size(0) for ex in batch])
     if maxlen is None:
-        if activity == False:
-            seq_lens = [ex[3].sum(dim=0).max().item() for ex in batch]
-            maxlen = int(np.max(seq_lens))
-        else:
-            seq_lens = [ex[1].size(0) for ex in batch]
-            maxlen = int(np.max(seq_lens))
+        maxlen = int(np.max(seq_lens))
+    maxlen = max(1, maxlen)
 
     enc_combined_tt = torch.zeros([len(batch), maxlen, D]).to(device)
     enc_combined_vals = torch.zeros([len(batch), maxlen, D]).to(device)
@@ -253,10 +253,10 @@ def variable_time_collate_fn_indseq(batch, args, device, input_dim, return_np=Fa
         # currlen = min(int(mask.sum(0).max()),maxlen)
         for d in range(D):
             mask_bd = mask[:,d].bool()
-            currlen = int(mask_bd.sum())
-            enc_combined_tt[b, :currlen, d] = tt[mask_bd]
-            enc_combined_vals[b, :currlen, d] = vals[mask_bd,d]
-            enc_combined_mask[b, :currlen, d] = mask[mask_bd,d]
+            currlen = min(int(mask_bd.sum()), maxlen)
+            enc_combined_tt[b, :currlen, d] = tt[mask_bd][:currlen]
+            enc_combined_vals[b, :currlen, d] = vals[mask_bd,d][:currlen]
+            enc_combined_mask[b, :currlen, d] = mask[mask_bd,d][:currlen]
         if labels.dim() == 2:
             print(record_id)
             combined_labels[b] = torch.argmax(labels,dim=-1)
@@ -276,7 +276,7 @@ def variable_time_collate_fn_indseq(batch, args, device, input_dim, return_np=Fa
     combined_data = torch.cat(
         (enc_combined_vals, enc_combined_mask, enc_combined_tt), 2)
 
-    return combined_data, combined_labels, torch.tensor(seq_lens).to(device)
+    return combined_data, combined_labels, torch.tensor(seq_lens).clamp(1, maxlen).to(device)
 
 def get_time_PAM(data):
     T,F = data[0].shape
@@ -338,7 +338,7 @@ def get_PAM_data(args, device):
     print("Test record ids (last 20):", test_record_ids[-20:])
 
     record_id, tt, vals, mask, labels = train_data[0]
-    data_mean, data_std, time_max = get_data_mean_std(seen_data, device)
+    data_mean, data_std, time_max = get_data_mean_std(train_data, device)
     print("data norm:", data_mean.sum(), data_std.sum())
 
     input_dim = vals.size(-1)
@@ -368,11 +368,11 @@ def get_PAM_data(args, device):
     print("collate label shape:", train_data_combined[1].shape, val_data_combined[1].shape, test_data_combined[1].shape)
 
     train_data_combined = TensorDataset(
-        train_data_combined[0], train_data_combined[1].long().squeeze(), train_data_combined[2])
+        train_data_combined[0], train_data_combined[1].long().reshape(-1), train_data_combined[2])
     val_data_combined = TensorDataset(
-        val_data_combined[0], val_data_combined[1].long().squeeze(), val_data_combined[2])
+        val_data_combined[0], val_data_combined[1].long().reshape(-1), val_data_combined[2])
     test_data_combined = TensorDataset(
-        test_data_combined[0], test_data_combined[1].long().squeeze(), test_data_combined[2])
+        test_data_combined[0], test_data_combined[1].long().reshape(-1), test_data_combined[2])
 
     train_dataloader = DataLoader(
         train_data_combined, batch_size=batch_size, shuffle=True)
@@ -388,6 +388,7 @@ def get_processed_data(data, label):
     for patient,tag in zip(data, label):
         id = patient['id']
         time = torch.Tensor(patient['time'])
+        first_zero_index_after_first_element = len(time)
         for i in range(1, len(time)):
             if time[i] == 0:
                 first_zero_index_after_first_element = i
@@ -431,7 +432,7 @@ def get_P12_data(args, device):
     print("Test record ids (last 20):", test_record_ids[-20:])
 
     record_id, tt, vals, mask, labels = train_data[0]
-    data_mean, data_std, time_max = get_data_mean_std(seen_data, device)
+    data_mean, data_std, time_max = get_data_mean_std(train_data, device)
     print("data norm:", data_mean.sum(), data_std.sum())
 
     input_dim = vals.size(-1)
@@ -460,11 +461,11 @@ def get_P12_data(args, device):
     print("collate label shape:", train_data_combined[1].shape, val_data_combined[1].shape, test_data_combined[1].shape)
 
     train_data_combined = TensorDataset(
-        train_data_combined[0], train_data_combined[1].long().squeeze(), train_data_combined[2])
+        train_data_combined[0], train_data_combined[1].long().reshape(-1), train_data_combined[2])
     val_data_combined = TensorDataset(
-        val_data_combined[0], val_data_combined[1].long().squeeze(), val_data_combined[2])
+        val_data_combined[0], val_data_combined[1].long().reshape(-1), val_data_combined[2])
     test_data_combined = TensorDataset(
-        test_data_combined[0], test_data_combined[1].long().squeeze(), test_data_combined[2])
+        test_data_combined[0], test_data_combined[1].long().reshape(-1), test_data_combined[2])
 
     train_dataloader = DataLoader(
         train_data_combined, batch_size=batch_size, shuffle=True)
@@ -498,7 +499,7 @@ def get_P19_data(args, device):
     print("Test record ids (last 20):", test_record_ids[-20:])
 
     record_id, tt, vals, mask, labels = train_data[0]
-    data_mean, data_std, time_max = get_data_mean_std(seen_data, device)
+    data_mean, data_std, time_max = get_data_mean_std(train_data, device)
     print("data norm:", data_mean.sum(), data_std.sum())
 
     input_dim = vals.size(-1)
@@ -527,11 +528,11 @@ def get_P19_data(args, device):
     print("collate label shape:", train_data_combined[1].shape, val_data_combined[1].shape, test_data_combined[1].shape)
 
     train_data_combined = TensorDataset(
-        train_data_combined[0], train_data_combined[1].long().squeeze(), train_data_combined[2])
+        train_data_combined[0], train_data_combined[1].long().reshape(-1), train_data_combined[2])
     val_data_combined = TensorDataset(
-        val_data_combined[0], val_data_combined[1].long().squeeze(), val_data_combined[2])
+        val_data_combined[0], val_data_combined[1].long().reshape(-1), val_data_combined[2])
     test_data_combined = TensorDataset(
-        test_data_combined[0], test_data_combined[1].long().squeeze(), test_data_combined[2])
+        test_data_combined[0], test_data_combined[1].long().reshape(-1), test_data_combined[2])
 
     train_dataloader = DataLoader(
         train_data_combined, batch_size=batch_size, shuffle=True)
@@ -552,6 +553,7 @@ def get_processed_data_static(data, label, use_static=False):
             # static = torch.Tensor(patient['static'])
         id = patient['id']
         time = torch.Tensor(patient['time'])
+        first_zero_index_after_first_element = len(time)
         for i in range(1, len(time)):
             if time[i] == 0:
                 first_zero_index_after_first_element = i
@@ -619,7 +621,7 @@ def get_P12_data_zeroshot(args, device):
     print("Test record ids (last 20):", test_record_ids[-20:])
 
     record_id, tt, vals, mask, labels = train_data[0]
-    data_mean, data_std, time_max = get_data_mean_std(seen_data, device)
+    data_mean, data_std, time_max = get_data_mean_std(train_data, device)
     print("data norm:", data_mean.sum(), data_std.sum())
 
     input_dim = vals.size(-1)
@@ -648,11 +650,11 @@ def get_P12_data_zeroshot(args, device):
     print("collate label shape:", train_data_combined[1].shape, val_data_combined[1].shape, test_data_combined[1].shape)
 
     train_data_combined = TensorDataset(
-        train_data_combined[0], train_data_combined[1].long().squeeze(), train_data_combined[2])
+        train_data_combined[0], train_data_combined[1].long().reshape(-1), train_data_combined[2])
     val_data_combined = TensorDataset(
-        val_data_combined[0], val_data_combined[1].long().squeeze(), val_data_combined[2])
+        val_data_combined[0], val_data_combined[1].long().reshape(-1), val_data_combined[2])
     test_data_combined = TensorDataset(
-        test_data_combined[0], test_data_combined[1].long().squeeze(), test_data_combined[2])
+        test_data_combined[0], test_data_combined[1].long().reshape(-1), test_data_combined[2])
 
     train_dataloader = DataLoader(
         train_data_combined, batch_size=batch_size, shuffle=True)

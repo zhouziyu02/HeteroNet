@@ -32,6 +32,8 @@ def set_device(gpu=-1):
             device = torch.device("cuda:" + str(gpu))
         elif is_torch_mps_available():
             device = torch.device("mps")
+        else:
+            raise RuntimeError("No GPU backend is available; set gpu=-1 to use CPU.")
     else:
         device = torch.device("cpu")
     return device

@@ -39,11 +39,12 @@ class Runner(Registrable):
                 **kwargs
             )
 
-        # Needed for Intensity Free model
-        mean_log_inter_time, std_log_inter_time, min_dt, max_dt = (
-            self._data_loader.train_loader().dataset.get_dt_stats())
-        runner_config.model_config.set("mean_log_inter_time", mean_log_inter_time)
-        runner_config.model_config.set("std_log_inter_time", std_log_inter_time)
+        if not skip_data_loader:
+            # These optional statistics are not used by the HeteroNet head.
+            mean_inter_time, std_inter_time, _, _ = (
+                self._data_loader.train_loader().dataset.get_dt_stats())
+            runner_config.model_config.set("mean_log_inter_time", mean_inter_time)
+            runner_config.model_config.set("std_log_inter_time", std_inter_time)
         self.timer = Timer()
 
     @staticmethod

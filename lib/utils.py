@@ -675,7 +675,7 @@ class EarlyStopping:
         self.counter = 0
         self.best_score = None
         self.early_stop = False
-        self.val_loss_min = np.Inf
+        self.val_loss_min = np.inf
         self.delta = delta
         self.save_path = save_path
         self.dp_flag = dp_flag
@@ -779,8 +779,7 @@ def log_info_forecast(opt, phase, epoch, start=0.0, mse=0.0, mae=0.0, loss=0.0, 
 
 def load_checkpoints(save_path, model, classifier=None, time_predictor=None, decoder=None, dp_flag=False, use_cpu=False):
     if not os.path.getsize(save_path) > 0:
-        print(save_path, " is None file")
-        sys.exit(0)
+        raise ValueError(f'Checkpoint is empty: {save_path}')
 
     # Load trusted experiment metadata explicitly on modern PyTorch. State dict
     # tensors are copied to the model's current device by load_state_dict below.
@@ -822,15 +821,21 @@ def evaluate_mc(label, pred, n_class):
         precision = metrics.precision_score(label, ypred, zero_division=0)
         recall = metrics.recall_score(label, ypred, zero_division=0)
         F1 = metrics.f1_score(label, ypred, zero_division=0)
-        auroc = metrics.roc_auc_score(label, probs[:, 1])
-        auprc = metrics.average_precision_score(label, probs[:, 1])
+        auroc = metrics.roc_auc_score(label, probs[:, 1]) if np.unique(label).size == 2 else float('nan')
+        auprc = metrics.average_precision_score(label, probs[:, 1]) if np.any(np.asarray(label) == 1) else 0.0
     elif n_class > 2:
         acc = np.sum(label.ravel() == ypred.ravel()) / pred.shape[0]
         precision = metrics.precision_score(label, ypred, average="macro", zero_division=0)
         recall = metrics.recall_score(label, ypred, average="macro", zero_division=0)
         F1 = metrics.f1_score(label, ypred, average="macro", zero_division=0)
-        auroc = metrics.roc_auc_score(one_hot(label), probs)
-        auprc = metrics.average_precision_score(one_hot(label), probs)
+        targets = np.eye(n_class)[np.asarray(label).astype(int).reshape(-1)]
+        aucs = [metrics.roc_auc_score(targets[:, i], probs[:, i])
+                for i in range(n_class) if np.unique(targets[:, i]).size == 2]
+        auroc = float(np.mean(aucs)) if len(aucs) == n_class else float('nan')
+        auprc = float(np.mean([
+            metrics.average_precision_score(targets[:, i], probs[:, i])
+            if targets[:, i].any() else 0.0 for i in range(n_class)
+        ]))
 
     return acc, auroc, auprc, precision, recall, F1
 

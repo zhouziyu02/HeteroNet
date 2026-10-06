@@ -81,13 +81,16 @@ def train_epoch(model, training_data, optimizer, pred_loss_func, opt, classifier
     """ Epoch operation in training phase. """
 
     model.train()
+    classifier.train()
     losses = []
     sup_preds, sup_labels = [], []
     acc, auroc, auprc = 0,0,0
 
     training_data_list = list(training_data)
     num_total_batches = len(training_data_list)
-    num_sampled_batches = int(num_total_batches * opt.sample_rate)
+    if not num_total_batches:
+        raise ValueError('The training loader is empty.')
+    num_sampled_batches = max(1, int(num_total_batches * opt.sample_rate))
 
     sampled_indices = np.random.choice(num_total_batches, size=num_sampled_batches, replace=False)
 
@@ -122,10 +125,8 @@ def train_epoch(model, training_data, optimizer, pred_loss_func, opt, classifier
                 sup_pred, labels, opt.rank_loss_margin)
         # sup_pred = torch.softmax(sup_pred, dim=-1)
 
-        if torch.any(torch.isnan(loss)):
-            print("exit nan in pred loss!!!")
-            print("sup_pred\n", sup_pred)
-            sys.exit(0)
+        if not torch.isfinite(loss):
+            raise FloatingPointError('Classification loss is not finite.')
 
         losses.append(loss.item())
         loss.backward()
@@ -168,6 +169,7 @@ def eval_epoch(model, validation_data, pred_loss_func, opt, classifier, save_res
     """ Epoch operation in evaluation phase. """
 
     model.eval()
+    classifier.eval()
 
     valid_losses = []
     sup_preds = []
@@ -196,6 +198,8 @@ def eval_epoch(model, validation_data, pred_loss_func, opt, classifier, save_res
             valid_loss_vec = pred_loss_func((sup_pred + eps), labels)
             valid_loss_vec = apply_focal_weight(valid_loss_vec, sup_pred, labels, opt.focal_gamma)
             valid_loss = torch.sum(valid_loss_vec)
+            if not torch.isfinite(valid_loss):
+                raise FloatingPointError('Classification evaluation loss is not finite.')
             # sup_pred = torch.softmax(sup_pred, dim=-1)
 
             sup_preds.append(sup_pred.detach().cpu().numpy())
@@ -209,7 +213,9 @@ def eval_epoch(model, validation_data, pred_loss_func, opt, classifier, save_res
             gc.collect()
             torch.cuda.empty_cache()
 
-    valid_loss = np.average(valid_losses)
+    if not sup_preds:
+        raise ValueError('The evaluation loader is empty.')
+    valid_loss = np.average(valid_losses) if valid_losses else 0.0
 
     if len(sup_preds) > 0:
         sup_labels = np.concatenate(sup_labels, axis=0)
@@ -228,7 +234,7 @@ def run_experiment(model, training_data, validation_data, testing_data, optimize
 
     epoch = 0
     best_valid_metric = -np.inf
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = None
     is_heteronet = opt.model.lower() in HETERONET_MODEL_NAMES
     save_flag = True
 
@@ -252,6 +258,8 @@ def run_experiment(model, training_data, validation_data, testing_data, optimize
 
                 start = time.time()
                 valid_metric = classification_selection_metric(opt, valid_auroc, valid_auprc)
+                if not np.isfinite(valid_metric):
+                    raise ValueError('The validation selection metric is undefined; use a split containing each class.')
                 if(best_valid_metric < valid_metric):
                     best_valid_metric = valid_metric
                     test_acc, test_auroc, test_auprc, test_precision, test_recall, test_F1, _ = eval_epoch(model, testing_data, pred_loss_func, opt, classifier, save_res=True)
@@ -282,13 +290,13 @@ def run_experiment(model, training_data, validation_data, testing_data, optimize
                         break
             else:
                 start = time.time()
-                test_acc, test_auroc, test_auprc, _ = eval_epoch(model, testing_data, pred_loss_func, opt, classifier, save_res=True)
+                test_acc, test_auroc, test_auprc, _, _, _, _ = eval_epoch(model, testing_data, pred_loss_func, opt, classifier, save_res=True)
 
                 log_info(opt, 'Testing', epoch, test_acc, start=start, auroc=test_auroc, auprc=test_auprc, save=save_flag)
 
             scheduler.step()
 
-    if not opt.retrain and save_path is not None:
+    if not opt.retrain and not opt.test_only and save_path is not None and os.path.isfile(save_path):
         print("Testing...")
         model, classifier, _, _ = load_checkpoints(save_path, model, classifier=classifier, dp_flag=opt.dp_flag)
 
@@ -330,7 +338,7 @@ def main():
     parser.add_argument('--load_path', type=str, default=None)
     parser.add_argument('--test_only', action='store_true')
 
-    parser.add_argument('--task', type=str, default='nan')
+    parser.add_argument('--task', type=str, required=True, choices=['PAM', 'P12', 'P19'])
 
     parser.add_argument('--debug', action='store_true')
     parser.add_argument('--fillmiss', action='store_true')
@@ -372,6 +380,12 @@ def main():
     parser.add_argument('--use_periodic_branch', type=int, default=1)
 
     opt = parser.parse_args()
+    if not 0 < opt.sample_rate <= 1:
+        parser.error('--sample_rate must be in (0, 1].')
+    if opt.epoch <= 0 or opt.batch_size <= 0:
+        parser.error('--epoch and --batch_size must be positive.')
+    if opt.test_only and opt.load_path is None:
+        parser.error('--test_only requires --load_path.')
     os.environ["CUDA_VISIBLE_DEVICES"] = opt.gpu
 
     seed = opt.seed
@@ -515,7 +529,7 @@ def main():
     training_duration = time.time() - start_time
 
     # Evaluate the best saved checkpoint
-    if not opt.retrain:
+    if not opt.retrain and not opt.test_only:
         if save_path is not None and os.path.exists(save_path):
             model, mort_classifier, _, _ = load_checkpoints(save_path, model, classifier=mort_classifier, dp_flag=opt.dp_flag)
         elif early_stopping is not None and getattr(early_stopping, 'best_model_state', None) is not None:

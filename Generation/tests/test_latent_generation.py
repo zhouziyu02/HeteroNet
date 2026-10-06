@@ -123,6 +123,37 @@ class LatentGenerationTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 generation.parse_args()
 
+    def test_mmd_matches_pairwise_reference_and_handles_constant_samples(self):
+        rng = np.random.default_rng(5)
+        real, fake = rng.normal(size=(5, 4, 2)), rng.normal(size=(7, 4, 2))
+        x, y = real.reshape(5, -1), fake.reshape(7, -1)
+        xy = np.vstack([x, y])
+        sq = np.square(xy[:, None] - xy[None, :]).sum(axis=-1)
+        gamma = 1.0 / (2.0 * (np.median(sq[sq > 0]) + 1e-6))
+        kernel = np.exp(-gamma * sq)
+        expected = kernel[:5, :5].mean() + kernel[5:, 5:].mean() - 2 * kernel[:5, 5:].mean()
+        self.assertAlmostEqual(generation.rbf_mmd(real, fake), expected, places=12)
+        constant = np.ones((3, 4, 2), dtype=np.float32)
+        self.assertEqual(generation.rbf_mmd(constant, constant), 0.0)
+
+    def test_short_sequence_and_out_of_range_metrics_remain_finite(self):
+        real = np.arange(24, dtype=np.float32).reshape(3, 4, 2)
+        fake = real + 1000.0
+        expected_acf = np.mean([
+            np.abs((real[:, :-lag] * real[:, lag:]).mean(axis=(0, 1))
+                   - (fake[:, :-lag] * fake[:, lag:]).mean(axis=(0, 1))).mean()
+            for lag in range(1, 4)
+        ])
+        self.assertAlmostEqual(generation.acf_error(real, fake), float(expected_acf))
+        self.assertTrue(np.isfinite(generation.flat_kl(real, fake)))
+
+    def test_metrics_reject_empty_train_or_time_pairs(self):
+        singleton = np.ones((1, 4, 2), dtype=np.float32)
+        with self.assertRaisesRegex(ValueError, "at least two real"):
+            generation.table1_discriminative_score(singleton, singleton, torch.device("cpu"), 1, 1)
+        with self.assertRaisesRegex(ValueError, "at least two timesteps"):
+            generation.acf_error(singleton[:, :1], singleton[:, :1])
+
 
 if __name__ == "__main__":
     unittest.main()

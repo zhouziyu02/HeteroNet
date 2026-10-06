@@ -53,6 +53,11 @@ class TPPDataLoader:
                   ValueError, "Inconsistent dim_process in different splits.")
 
         source_data = data[split]
+        for seq_index, seq in enumerate(source_data):
+            for event in seq:
+                mark = event['type_event']
+                if not isinstance(mark, (int, np.integer)) or not 0 <= mark < self.num_event_types:
+                    raise ValueError(f"Sequence {seq_index} has an event type outside the configured range.")
         return {
             'time_seqs': [[x["time_since_start"] for x in seq] for seq in source_data],
             'type_seqs': [[x["type_event"] for x in seq] for seq in source_data],

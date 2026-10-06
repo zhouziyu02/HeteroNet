@@ -32,6 +32,9 @@ class TorchBaseModel(nn.Module):
         self.event_sampler = None
         self.device = set_device(model_config.gpu)
         self.use_mc_samples = model_config.use_mc_samples
+        minimum_samples = 1 if self.use_mc_samples else 2
+        if self.loss_integral_num_sample_per_step < minimum_samples:
+            raise ValueError(f"Likelihood integration requires at least {minimum_samples} time samples.")
 
         self.to(self.device)
 
@@ -107,9 +110,11 @@ class TorchBaseModel(nn.Module):
         total_sampled_lambdas = lambdas_loss_samples.sum(dim=-1)
 
         # Compute event LL - [batch_size, seq_len]
+        valid_events = seq_mask.bool() & type_seq.ne(self.pad_token_id)
+        masked_types = type_seq.masked_fill(~valid_events, self.pad_token_id)
         event_ll = -F.nll_loss(
             log_marked_event_lambdas.permute(0, 2, 1),  # mark dimension needs to come second, not third to match nll_loss specs
-            target=type_seq,
+            target=masked_types,
             ignore_index=self.pad_token_id,  # Padded events have a pad_token_id as a value
             reduction='none', # Does not aggregate, and replaces what would have been the log(marked intensity) with 0.
         )
@@ -117,11 +122,12 @@ class TorchBaseModel(nn.Module):
         # Compute non-event LL [batch_size, seq_len]
         # interval_integral = length_interval * average of sampled lambda(t)
         if self.use_mc_samples:
-            non_event_ll = total_sampled_lambdas.mean(dim=-1) * time_delta_seq * seq_mask
+            non_event_ll = total_sampled_lambdas.mean(dim=-1) * time_delta_seq * valid_events
         else: # Use trapezoid rule
-            non_event_ll = 0.5 * (total_sampled_lambdas[..., 1:] + total_sampled_lambdas[..., :-1]).mean(dim=-1) * time_delta_seq * seq_mask
+            non_event_ll = 0.5 * (total_sampled_lambdas[..., 1:] + total_sampled_lambdas[..., :-1]).mean(dim=-1) * time_delta_seq * valid_events
 
-        num_events = torch.masked_select(event_ll, event_ll.ne(0.0)).size()[0]
+        # Event count is independent of the numerical value of log intensity.
+        num_events = int(valid_events.sum().item())
         return event_ll, non_event_ll, num_events
 
     def make_dtime_loss_samples(self, time_delta_seq):
@@ -248,7 +254,8 @@ class TorchBaseModel(nn.Module):
                                                                             time_delta_seq,
                                                                             event_seq,
                                                                             dtimes_pred[:, :, None],
-                                                                            max_steps=event_seq.size()[1])
+                                                                            max_steps=event_seq.size()[1],
+                                                                            compute_last_step_only=True)
 
             # [batch_size, seq_len, event_num]
             intensities_at_times = intensities_at_times.squeeze(dim=-2)

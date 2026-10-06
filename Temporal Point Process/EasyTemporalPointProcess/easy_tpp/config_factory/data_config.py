@@ -61,7 +61,7 @@ class DataSpecConfig(Config):
         """
         return DataSpecConfig(num_event_types_pad=self.num_event_types_pad,
                               num_event_types=self.num_event_types,
-                              event_pad_index=self.pad_token_id,
+                              pad_token_id=self.pad_token_id,
                               padding_side=self.padding_side,
                               truncation_side=self.truncation_side,
                               padding_strategy=self.padding_strategy,
@@ -127,7 +127,8 @@ class DataConfig(Config):
         return DataConfig(train_dir=self.train_dir,
                           valid_dir=self.valid_dir,
                           test_dir=self.test_dir,
-                          specs=self.data_specs)
+                          data_format=self.data_format,
+                          specs=self.data_specs.copy())
 
     def get_data_dir(self, split):
         """Get the dir of the source raw data.

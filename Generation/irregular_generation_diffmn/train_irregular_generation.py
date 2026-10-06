@@ -445,21 +445,32 @@ def rbf_mmd(x: np.ndarray, y: np.ndarray, max_samples: int = 512) -> float:
         x = x[rng.choice(len(x), max_samples, replace=False)]
     if len(y) > max_samples:
         y = y[rng.choice(len(y), max_samples, replace=False)]
-    x = x.reshape(len(x), -1)
-    y = y.reshape(len(y), -1)
+    x = x.reshape(len(x), -1).astype(np.float64, copy=False)
+    y = y.reshape(len(y), -1).astype(np.float64, copy=False)
     xy = np.vstack([x, y])
-    sq = ((xy[:, None, :] - xy[None, :, :]) ** 2).sum(-1)
-    sigma = np.sqrt(np.median(sq[sq > 0]) + 1e-6)
-    gamma = 1.0 / (2.0 * sigma * sigma)
-    kxx = np.exp(-gamma * ((x[:, None, :] - x[None, :, :]) ** 2).sum(-1)).mean()
-    kyy = np.exp(-gamma * ((y[:, None, :] - y[None, :, :]) ** 2).sum(-1)).mean()
-    kxy = np.exp(-gamma * ((x[:, None, :] - y[None, :, :]) ** 2).sum(-1)).mean()
+    # Keep the distance matrix two-dimensional rather than materializing
+    # [samples, samples, sequence_length * channels] temporary arrays.
+    squared_norm = np.square(xy).sum(axis=1)
+    sq = squared_norm[:, None] + squared_norm[None, :] - 2.0 * (xy @ xy.T)
+    np.maximum(sq, 0.0, out=sq)
+    np.fill_diagonal(sq, 0.0)
+    positive = sq[sq > 0]
+    bandwidth = np.median(positive) if positive.size else 0.0
+    gamma = 1.0 / (2.0 * (bandwidth + 1e-6))
+    kernel = np.exp(-gamma * sq)
+    n = len(x)
+    kxx = kernel[:n, :n].mean()
+    kyy = kernel[n:, n:].mean()
+    kxy = kernel[:n, n:].mean()
     return float(kxx + kyy - 2.0 * kxy)
 
 
 def flat_kl(real: np.ndarray, fake: np.ndarray) -> float:
     hist_real, edge_real = np.histogram(real[~np.isnan(real)], density=True, bins=50)
-    hist_fake, _ = np.histogram(fake[~np.isnan(fake)], density=True, bins=edge_real)
+    counts_fake, _ = np.histogram(fake[~np.isnan(fake)], bins=edge_real)
+    # NumPy density=True divides by zero if every generated value falls
+    # outside the reference range. Preserve zero counts for epsilon smoothing.
+    hist_fake = counts_fake / max(counts_fake.sum(), 1) / np.diff(edge_real)
     return float(entropy(hist_real, hist_fake + 1e-9))
 
 
@@ -486,6 +497,9 @@ def official_mdd(real: np.ndarray, fake: np.ndarray, n_bins: int = 20) -> float:
 
 
 def acf_error(real: np.ndarray, fake: np.ndarray, max_lag: int = 8) -> float:
+    max_lag = min(max_lag, real.shape[1] - 1, fake.shape[1] - 1)
+    if max_lag < 1:
+        raise ValueError("ACF scoring requires at least two timesteps and a positive max_lag")
     errs = []
     for lag in range(1, max_lag + 1):
         r = (real[:, :-lag] * real[:, lag:]).mean(axis=(0, 1))
@@ -502,6 +516,8 @@ def table1_discriminative_score(
     batch_size: int,
     hidden_dim: int | None = None,
 ) -> float:
+    if min(len(real), len(fake)) < 2:
+        raise ValueError("Discriminative scoring requires at least two real and two generated sequences")
     real_t = torch.as_tensor(real, dtype=torch.float32, device=device)
     fake_t = torch.as_tensor(fake, dtype=torch.float32, device=device)
     if hidden_dim is None:
@@ -590,6 +606,8 @@ def train(args: argparse.Namespace) -> dict:
     split = len(train_ids)
     train_data = data[:split]
     test_data = data[split:]
+    if len(test_data) < 2:
+        raise ValueError("The evaluation split needs at least two sequences for discriminative scoring")
     # Materialize only observed training inputs. Evaluation sequences remain
     # outside the encoder and the generator's two training stages.
     obs_train = np.where(mask[:split] > 0, train_data, 0.0).astype(np.float32)

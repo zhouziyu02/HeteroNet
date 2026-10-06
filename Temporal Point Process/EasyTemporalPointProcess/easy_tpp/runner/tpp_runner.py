@@ -182,6 +182,8 @@ class TPPRunner(Runner):
                 epoch_label.append(batch_label)
                 epoch_mask.append(batch_mask)
 
+            if total_num_event < 1:
+                raise ValueError("The data loader contains no non-padding target events.")
             avg_loss = total_loss / total_num_event
 
             metrics_dict.update({'loglike': -avg_loss, 'num_events': total_num_event})
@@ -194,6 +196,8 @@ class TPPRunner(Runner):
 
         # we need to improve the code here
         # classify batch_output to list
+        if not epoch_pred:
+            raise ValueError("The data loader is empty.")
         pred_exists, label_exists = False, False
         if epoch_pred[0][0] is not None:
             epoch_pred = concat_element(epoch_pred, pad_index)

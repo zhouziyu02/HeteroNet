@@ -279,7 +279,7 @@ def compute_error(truth, pred_y, mask, func, reduce, norm_dict=None):
 	elif(func == "MAPE"):
 		if(norm_dict == None):
 			mask = (truth_repeated != 0) * mask
-			truth_div = truth_repeated + (truth_repeated == 0) * 1e-8
+			truth_div = truth_repeated.abs() + (truth_repeated == 0) * 1e-8
 			error = torch.abs(truth_repeated - pred_y) / truth_div * mask
 		else:
 			data_max = norm_dict["data_max"]
@@ -287,12 +287,12 @@ def compute_error(truth, pred_y, mask, func, reduce, norm_dict=None):
 			truth_rescale = truth_repeated * (data_max - data_min) + data_min
 			pred_y_rescale = pred_y * (data_max - data_min) + data_min
 			mask = (truth_rescale != 0) * mask
-			truth_rescale_div = truth_rescale + (truth_rescale == 0) * 1e-8
+			truth_rescale_div = truth_rescale.abs() + (truth_rescale == 0) * 1e-8
 			error = torch.abs(truth_rescale - pred_y_rescale) / truth_rescale_div * mask
 	elif(func == "HUBER"):
 		delta = 2
 		abs_error = torch.abs(truth_repeated - pred_y)
-		quadratic = torch.min(abs_error, torch.tensor(delta))
+		quadratic = abs_error.clamp_max(delta)
 		linear = abs_error - quadratic
 		error = 0.5 * quadratic**2 + delta * linear
 		error = error * mask
@@ -314,6 +314,8 @@ def compute_error(truth, pred_y, mask, func, reduce, norm_dict=None):
 		error_var_avg = error_var_sum / (mask_count + 1e-8) # (n_dim, )
 		# print("error_var_avg", error_var_avg.max().item(), error_var_avg.min().item(), (1.0*error_var_avg).mean().item())
 		n_avai_var = torch.count_nonzero(mask_count)
+		if n_avai_var == 0:
+			raise ValueError('The batch has no observed prediction targets.')
 		error_avg = error_var_avg.sum() / n_avai_var # (1, )
 
 		return error_avg # a scalar (1, )
@@ -365,6 +367,8 @@ def compute_all_losses(model, batch_dict, dataset=None):
 	return results
 
 def evaluation(model, dataloader, n_batches):
+	if n_batches <= 0:
+		raise ValueError('The evaluation loader is empty.')
 
 	n_eval_samples = 0
 	n_eval_samples_mape = 0
@@ -406,6 +410,8 @@ def evaluation(model, dataloader, n_batches):
 	# print(n_eval_samples)
 	n_avai_var = torch.count_nonzero(n_eval_samples)
 	n_avai_var_mape = torch.count_nonzero(n_eval_samples_mape)
+	if n_avai_var == 0:
+		raise ValueError('The evaluation data have no observed prediction targets.')
 	# print(n_eval_samples.shape, n_avai_var)
 
 	### 1. Compute avg error of each variable first
@@ -414,7 +420,7 @@ def evaluation(model, dataloader, n_batches):
 	total_results["mse"] = (total_results["mse"] / (n_eval_samples + 1e-8)).sum() / n_avai_var
 	total_results["mae"] = (total_results["mae"] / (n_eval_samples + 1e-8)).sum() / n_avai_var
 	total_results["rmse"] = torch.sqrt(total_results["mse"])
-	total_results["mape"] = (total_results["mape"] / (n_eval_samples_mape + 1e-8)).sum() / n_avai_var_mape
+	total_results["mape"] = (total_results["mape"] / (n_eval_samples_mape + 1e-8)).sum() / n_avai_var_mape.clamp_min(1)
 
 	for key, var in total_results.items():
 		if isinstance(var, torch.Tensor):

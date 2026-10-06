@@ -56,7 +56,7 @@ class USHCN(object):
             sorted_inds = tt.argsort() # sort over time
             vals = torch.tensor(data[value_cols].values).to(self.device).float()
             mask = torch.tensor(data[mask_cols].values).to(self.device).float()
-            entities.append((record_id, tt[sorted_inds], vals[sorted_inds], mask[sorted_inds]))
+            entities.append((str(record_id), tt[sorted_inds], vals[sorted_inds], mask[sorted_inds]))
 
         torch.save(
             entities,
@@ -90,6 +90,7 @@ class USHCN(object):
 
 def USHCN_task_mask(args, total_dataset):
 	total_dataset_new = []
+	dropped = 0
 	for n, (record_id, tt, vals, mask, t_bias) in enumerate(total_dataset):
 		if(args.task == 'forecasting'):
 			mask_observed_tp = torch.lt(tt, args.history)
@@ -101,7 +102,14 @@ def USHCN_task_mask(args, total_dataset):
 			mask_observed_tp[mask_inds] = False
 		else:
 			raise Exception('{}: Wrong task specified!'.format(args.task))
+		if not mask[mask_observed_tp].bool().any() or not mask[~mask_observed_tp].bool().any():
+			dropped += 1
+			continue
 		total_dataset_new.append((record_id, tt, vals, mask, mask_observed_tp, t_bias))
+	if dropped:
+		print(f'Excluded {dropped} USHCN windows without observed inputs or prediction targets.')
+	if not total_dataset_new:
+		raise ValueError('No usable USHCN windows remain; check history, mask_rate, and observation masks.')
 
 	return total_dataset_new
 
